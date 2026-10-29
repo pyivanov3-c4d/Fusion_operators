@@ -1,0 +1,122 @@
+[
+  {
+    "case": "identity",
+    "max_8bit_difference": 0,
+    "mean_8bit_difference": 0.0
+  },
+  {
+    "case": "preview_off",
+    "max_8bit_difference": 0,
+    "mean_8bit_difference": 0.0
+  },
+  {
+    "case": "Reds_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.094879150390625
+  },
+  {
+    "case": "Yellows_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.1002197265625
+  },
+  {
+    "case": "Greens_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.1043701171875
+  },
+  {
+    "case": "Cyans_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.108978271484375
+  },
+  {
+    "case": "Blues_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.106842041015625
+  },
+  {
+    "case": "Magentas_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.099945068359375
+  },
+  {
+    "case": "Whites_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.04248046875
+  },
+  {
+    "case": "Neutrals_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.33355712890625
+  },
+  {
+    "case": "Blacks_0",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.050048828125
+  },
+  {
+    "case": "all_ranges_0",
+    "max_8bit_difference": 2,
+    "mean_8bit_difference": 0.39739990234375
+  },
+  {
+    "case": "extremes_0",
+    "max_8bit_difference": 2,
+    "mean_8bit_difference": 0.273529052734375
+  },
+  {
+    "case": "Reds_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.116424560546875
+  },
+  {
+    "case": "Yellows_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.112060546875
+  },
+  {
+    "case": "Greens_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.108551025390625
+  },
+  {
+    "case": "Cyans_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.108428955078125
+  },
+  {
+    "case": "Blues_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.10614013671875
+  },
+  {
+    "case": "Magentas_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.110748291015625
+  },
+  {
+    "case": "Whites_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.050323486328125
+  },
+  {
+    "case": "Neutrals_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.34808349609375
+  },
+  {
+    "case": "Blacks_1",
+    "max_8bit_difference": 1,
+    "mean_8bit_difference": 0.052093505859375
+  },
+  {
+    "case": "all_ranges_1",
+    "max_8bit_difference": 2,
+    "mean_8bit_difference": 0.377685546875
+  },
+  {
+    "case": "extremes_1",
+    "max_8bit_difference": 3,
+    "mean_8bit_difference": 0.270233154296875
+  }
+]
