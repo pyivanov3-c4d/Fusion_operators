@@ -1,0 +1,33 @@
+{
+  "alpha_identity": [
+    180,
+    100,
+    50,
+    128
+  ],
+  "alpha_adjust": [
+    132,
+    100,
+    50,
+    128
+  ],
+  "opaque_adjust": [
+    132,
+    100,
+    50,
+    255
+  ],
+  "zero_alpha": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "linear_adjust": [
+    129,
+    100,
+    50,
+    255
+  ],
+  "linear_reference_red": 129
+}
