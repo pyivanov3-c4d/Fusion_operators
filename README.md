@@ -2,6 +2,14 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_Threshold
+
+Photoshop-style black-and-white Threshold with **Threshold Level** from 1–255, default **128**. Includes Preview bypass, preserved alpha, and optional linear-sRGB input handling.
+
+Download [PSN_Threshold.fuse](Fuses/PSN_Threshold.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_Threshold**.
+
+All 16,384 pixels matched Photoshop 27.2.0 exactly at each of nine tested levels in the 8-bit RGB fixture. Photoshop's histogram is not included. See the [usage guide and validation details](docs/PSN_Threshold.md).
+
 ## PSN_CleanSharp
 
 High Pass sharpening blended over the original using **Overlay**.
