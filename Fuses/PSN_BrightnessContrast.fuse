@@ -1,0 +1,192 @@
+-- PSN_BrightnessContrast 1.0
+-- Photoshop-style classic Brightness/Contrast (modern and Use Legacy modes).
+-- Math informed by Seth A. Robinson's Patchy calibration research, MIT licensed:
+-- https://github.com/SethRobinson/Patchy/blob/main/docs/adjustments-calibration.md
+-- Independently implemented in Lua and compared with local Photoshop 27.2.0 output.
+-- Research attribution/license: operators/third-party/Patchy-MIT.txt.
+FuRegisterClass("PSN_BrightnessContrast", CT_Tool, {
+    REGS_Name = "PSN_BrightnessContrast",
+    REGS_Category = "PSN\\Color",
+    REGS_OpIconString = "BC",
+    REGS_OpDescription = "Photoshop-style Brightness/Contrast, including Use Legacy",
+    REG_NoMotionBlurCtrls = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false,
+})
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
+    })
+    OutImage = self:AddOutput("Output", "Output", {LINKID_DataType = "Image", LINK_Main = 1})
+    InBrightness = self:AddInput("Brightness", "Brightness", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 0, INP_Integer = true,
+        INP_MinScale = -150, INP_MaxScale = 150,
+        INP_MinAllowed = -150, INP_MaxAllowed = 150,
+    })
+    InContrast = self:AddInput("Contrast", "Contrast", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 0, INP_Integer = true,
+        INP_MinScale = -50, INP_MaxScale = 100,
+        INP_MinAllowed = -50, INP_MaxAllowed = 100,
+    })
+    InLegacy = self:AddInput("Use Legacy", "UseLegacy", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl",
+        INP_Default = 0, INP_DoNotifyChanged = true,
+        INPS_StatusText = "Legacy uses the older clipping adjustment. Off uses the classic Photoshop nonlinear, highlight-protecting curve.",
+    })
+    InPreview = self:AddInput("Preview", "Preview", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+    })
+    self:BeginControlNest("Fusion Options", "FusionOptions", false, {})
+    InSpace = self:AddInput("Input encoding", "InputEncoding", {
+        LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
+        {CCS_AddString = "RGB as supplied (Photoshop-style)"},
+        {CCS_AddString = "Linear sRGB / Rec.709 primaries"},
+        INPS_StatusText = "Match Photoshop's RGB working space. The linear option is for linear sRGB, not ACEScg or camera log.",
+    })
+    InAlpha = self:AddInput("Pre-Divide / Post-Multiply", "PreDivide", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+        INPS_StatusText = "Enable for premultiplied RGB; disable for straight alpha. Alpha is preserved.",
+    })
+    self:EndControlNest()
+end
+
+function NotifyChanged(inp, param, time)
+    if inp == InLegacy and InBrightness and InContrast then
+        local old = param.Value > 0.5
+        local br = old and 100 or 150
+        local cn = old and -100 or -50
+        InBrightness:SetAttrs({INP_MinScale=-br, INP_MaxScale=br, INP_MinAllowed=-br, INP_MaxAllowed=br})
+        InContrast:SetAttrs({INP_MinScale=cn, INP_MinAllowed=cn})
+    end
+end
+
+local function positiveBrightness(x, amount)
+    if amount > 100 then
+        return positiveBrightness(positiveBrightness(x, 100), amount-100)
+    end
+    local gain = 2^(amount/110)
+    local start = 0.5/gain
+    if x <= start then return gain*x end
+    local tail = math.max(0.1, 1/(1+12*(gain-1)))
+    local span = 1-start
+    local u = (x-start)/span
+    local u2, u3 = u*u, u*u*u
+    local y = 0.5*(2*u3-3*u2+1) + span*gain*(u3-2*u2+u)
+            + (-2*u3+3*u2) + span*tail*(u3-u2)
+    return math.min(1, math.max(0,y))
+end
+
+local function modernValue(x, brightness, contrast)
+    local y = x
+    if brightness > 0 then
+        y = positiveBrightness(x,brightness)
+    elseif brightness < 0 and x > 0 and x < 1 then
+        local low,high=0,1
+        for i=1,32 do
+            local mid=(low+high)*0.5
+            if positiveBrightness(mid,-brightness)<x then low=mid else high=mid end
+        end
+        y=(low+high)*0.5
+    end
+    local beta=1-0.0076*contrast
+    local u=math.min(y,1-y)
+    local value=(2-2*beta)*u*u+beta*u
+    return y <= 0.5 and value or 1-value
+end
+
+local cacheKey, cacheLUT
+local LUTSIZE=8192
+
+local processPixel=function(x,y,p)
+    local alpha=p.A
+    if unpremultiply and alpha<=0 then return p end
+    local factor=unpremultiply and alpha or 1
+    local r,g,b=p.R/factor,p.G/factor,p.B/factor
+    local channels={r,g,b}
+    for channel=1,3 do
+        local v=channels[channel]
+        if linear then v=v<=0.0031308 and 12.92*v or 1.055*v^(1/2.4)-0.055 end
+        local bounded=math.min(1,math.max(0,v))
+        local adjusted
+        if legacy then
+            if contrast>=100 then
+                adjusted=bounded*255+brightness>=127 and 1 or 0
+            elseif contrast>0 then
+                adjusted=(bounded+brightness/255-0.5)*100/(100-contrast)+0.5
+            else
+                adjusted=(bounded-0.5)*(100+contrast)/100+0.5+brightness/255
+            end
+            adjusted=math.min(1,math.max(0,adjusted))
+        else
+            local pos=bounded*lutsize
+            local index=math.min(lutsize-1,math.floor(pos))
+            local weight=pos-index
+            adjusted=lut[index+1]*(1-weight)+lut[index+2]*weight
+        end
+        -- Preserve the HDR/negative residual as a compositor-specific extension.
+        v=v-bounded+adjusted
+        if linear then v=v<=0.04045 and v/12.92 or ((v+0.055)/1.055)^2.4 end
+        channels[channel]=v*factor
+    end
+    p.R,p.G,p.B=channels[1],channels[2],channels[3]
+    return p
+end
+
+function Process(req)
+    local src=InImage:GetValue(req)
+    if not src then return end
+    local old=InLegacy:GetValue(req).Value>0.5
+    local brightness=InBrightness:GetValue(req).Value
+    local contrast=InContrast:GetValue(req).Value
+    brightness=math.max(old and -100 or -150,math.min(old and 100 or 150,brightness))
+    contrast=math.max(old and -100 or -50,math.min(100,contrast))
+    if InPreview:GetValue(req).Value<0.5 or (brightness==0 and contrast==0) then
+        OutImage:Set(req,src); return
+    end
+    local lut={}
+    if not old then
+        local key=tostring(brightness)..":"..tostring(contrast)
+        if key~=cacheKey then
+            local values={}
+            for i=0,LUTSIZE do values[i+1]=modernValue(i/LUTSIZE,brightness,contrast) end
+            cacheLUT,cacheKey=values,key
+        end
+        lut=cacheLUT
+    end
+    src:DownloadGPUMem(req)
+    local dst=Image({IMG_Like=src})
+    dst:MultiProcessPixels(nil,{
+        brightness=brightness,contrast=contrast,legacy=old,lut=lut,lutsize=LUTSIZE,
+        linear=InSpace:GetValue(req).Value>0.5,
+        unpremultiply=InAlpha:GetValue(req).Value>0.5,
+    },0,0,src.Width,src.Height,src,processPixel)
+    OutImage:Set(req,dst)
+end
+
+--[[ Research license notice:
+MIT License
+
+Copyright (c) 2026 Seth A. Robinson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+]]

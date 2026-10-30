@@ -1,0 +1,254 @@
+[
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  },
+  {
+    "case": {
+      "brightness": 150,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4833170572916667
+  },
+  {
+    "case": {
+      "brightness": -150,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4539591471354167
+  },
+  {
+    "case": {
+      "brightness": 100,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4523722330729167
+  },
+  {
+    "case": {
+      "brightness": -100,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4734090169270833
+  },
+  {
+    "case": {
+      "brightness": 50,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4457600911458333
+  },
+  {
+    "case": {
+      "brightness": -50,
+      "contrast": 0,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4724324544270833
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": 100,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4516805013020833
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": -50,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4507649739583333
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": 50,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4590657552083333
+  },
+  {
+    "case": {
+      "brightness": 63,
+      "contrast": -12,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4598795572916667
+  },
+  {
+    "case": {
+      "brightness": 75,
+      "contrast": 65,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4713948567708333
+  },
+  {
+    "case": {
+      "brightness": -80,
+      "contrast": 70,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4478759765625
+  },
+  {
+    "case": {
+      "brightness": 150,
+      "contrast": 100,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.5007527669270834
+  },
+  {
+    "case": {
+      "brightness": -150,
+      "contrast": -50,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4661458333333333
+  },
+  {
+    "case": {
+      "brightness": 101,
+      "contrast": 37,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4779256184895833
+  },
+  {
+    "case": {
+      "brightness": -101,
+      "contrast": 37,
+      "legacy": false
+    },
+    "max_error": 1,
+    "mean_error": 0.4239095052083333
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": 0,
+      "legacy": true
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  },
+  {
+    "case": {
+      "brightness": 100,
+      "contrast": 0,
+      "legacy": true
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  },
+  {
+    "case": {
+      "brightness": -100,
+      "contrast": 0,
+      "legacy": true
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": 100,
+      "legacy": true
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": -100,
+      "legacy": true
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": 50,
+      "legacy": true
+    },
+    "max_error": 1,
+    "mean_error": 0.4558919270833333
+  },
+  {
+    "case": {
+      "brightness": 0,
+      "contrast": -50,
+      "legacy": true
+    },
+    "max_error": 1,
+    "mean_error": 0.22922770182291666
+  },
+  {
+    "case": {
+      "brightness": 30,
+      "contrast": 50,
+      "legacy": true
+    },
+    "max_error": 1,
+    "mean_error": 0.4589029947916667
+  },
+  {
+    "case": {
+      "brightness": -40,
+      "contrast": -40,
+      "legacy": true
+    },
+    "max_error": 1,
+    "mean_error": 0.18599446614583334
+  },
+  {
+    "case": {
+      "brightness": 30,
+      "contrast": -50,
+      "legacy": true
+    },
+    "max_error": 1,
+    "mean_error": 0.22922770182291666
+  },
+  {
+    "case": {
+      "brightness": -50,
+      "contrast": 100,
+      "legacy": true
+    },
+    "max_error": 0,
+    "mean_error": 0.0
+  }
+]

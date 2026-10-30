@@ -2,6 +2,19 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_BrightnessContrast
+
+Photoshop-style classic Brightness/Contrast with modern nonlinear curves, **Use Legacy**, and **Preview**. Includes premultiplied-alpha handling and optional linear-sRGB processing.
+
+- Modern: Brightness -150 to +150; Contrast -50 to +100.
+- Legacy: both sliders -100 to +100.
+- Tested against Photoshop 27.2.0 across 28 settings: maximum difference of 1/255 per RGB channel in the tested 8-bit exports.
+- Multithreaded CPU implementation. Auto adjustment and the newer Photoshop Light controls are not included.
+
+Download [PSN_BrightnessContrast.fuse](Fuses/PSN_BrightnessContrast.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_BrightnessContrast**. Python and MCP are not required.
+
+See the [usage guide and validation details](docs/PSN_BrightnessContrast.md).
+
 ## PSN_SelectiveColor
 
 A Lua Fuse that provides Photoshop-style Selective Color controls:
@@ -55,3 +68,4 @@ This version uses multithreaded CPU processing. It does not import Photoshop `.a
 - [Blackmagic: Fuse SDK](https://documents.blackmagicdesign.com/UserManuals/Fusion_Fuse_SDK.pdf)
 
 Independent implementation; not affiliated with or endorsed by Adobe. No Adobe source code is included.
+
