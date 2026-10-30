@@ -2,6 +2,19 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_CleanSharp
+
+High Pass sharpening blended over the original using **Overlay**.
+
+- **Radius:** 10 pixels by default.
+- **Intensity:** 20% by default, adjustable from 0–100% as Overlay opacity.
+- **Show High Pass** previews the intermediate detail image; **Preview** bypasses the effect.
+- Preserves alpha, with optional pre-divide/post-multiply handling.
+
+Download [PSN_CleanSharp.fuse](Fuses/PSN_CleanSharp.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_CleanSharp**.
+
+Compared with Photoshop 27.2.0: default settings differed by at most 1/255 per RGB channel on the test chart. This is a calibrated approximation; small-radius High Pass results can differ more. See the [usage guide and validation details](docs/PSN_CleanSharp.md).
+
 ## PSN_BrightnessContrast
 
 Photoshop-style classic Brightness/Contrast with modern nonlinear curves, **Use Legacy**, and **Preview**. Includes premultiplied-alpha handling and optional linear-sRGB processing.
