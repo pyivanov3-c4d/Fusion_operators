@@ -2,6 +2,14 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_Vibrance
+
+An approximation of Photoshop's **classic Vibrance**, with **Vibrance** and **Saturation** sliders from −100 to +100, both defaulting to 0. Includes Preview bypass, preserved alpha, and optional linear-sRGB input handling.
+
+Download [PSN_Vibrance.fuse](Fuses/PSN_Vibrance.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_Vibrance**.
+
+Compared against Photoshop 27.2.0 at 20 settings. Saturation-only differences stayed within 1/255 per RGB channel; Vibrance-only within 12/255. Strong combined settings can differ noticeably (up to 69/255 in the tested extremes). This targets classic Vibrance, not the newer Color and Vibrance algorithm. See the [usage guide and validation details](docs/PSN_Vibrance.md).
+
 ## PSN_PhotoFilter
 
 Photoshop-style Photo Filter with preset selection, a color swatch, **Density**, and **Preserve Luminosity**.

@@ -1,0 +1,142 @@
+[
+  {
+    "vibrance": 0,
+    "saturation": 0,
+    "max_error": 0,
+    "mean_error": 0.0,
+    "p99": 0.0
+  },
+  {
+    "vibrance": 10,
+    "saturation": 0,
+    "max_error": 2,
+    "mean_error": 0.08917236328125,
+    "p99": 1.0
+  },
+  {
+    "vibrance": 25,
+    "saturation": 0,
+    "max_error": 3,
+    "mean_error": 0.17069498697916666,
+    "p99": 2.0
+  },
+  {
+    "vibrance": 50,
+    "saturation": 0,
+    "max_error": 6,
+    "mean_error": 0.2753702799479167,
+    "p99": 4.0
+  },
+  {
+    "vibrance": 75,
+    "saturation": 0,
+    "max_error": 9,
+    "mean_error": 0.4110921223958333,
+    "p99": 5.0
+  },
+  {
+    "vibrance": 100,
+    "saturation": 0,
+    "max_error": 12,
+    "mean_error": 0.661865234375,
+    "p99": 6.0
+  },
+  {
+    "vibrance": -25,
+    "saturation": 0,
+    "max_error": 5,
+    "mean_error": 0.6768595377604166,
+    "p99": 4.0
+  },
+  {
+    "vibrance": -50,
+    "saturation": 0,
+    "max_error": 6,
+    "mean_error": 0.77557373046875,
+    "p99": 4.0
+  },
+  {
+    "vibrance": -75,
+    "saturation": 0,
+    "max_error": 7,
+    "mean_error": 0.6777140299479166,
+    "p99": 3.0
+  },
+  {
+    "vibrance": -100,
+    "saturation": 0,
+    "max_error": 8,
+    "mean_error": 0.67315673828125,
+    "p99": 4.0
+  },
+  {
+    "vibrance": 0,
+    "saturation": 50,
+    "max_error": 1,
+    "mean_error": 0.10638427734375,
+    "p99": 1.0
+  },
+  {
+    "vibrance": 0,
+    "saturation": 100,
+    "max_error": 1,
+    "mean_error": 0.08915201822916667,
+    "p99": 1.0
+  },
+  {
+    "vibrance": 0,
+    "saturation": -50,
+    "max_error": 1,
+    "mean_error": 0.146240234375,
+    "p99": 1.0
+  },
+  {
+    "vibrance": 0,
+    "saturation": -100,
+    "max_error": 1,
+    "mean_error": 0.14642333984375,
+    "p99": 1.0
+  },
+  {
+    "vibrance": 25,
+    "saturation": 25,
+    "max_error": 7,
+    "mean_error": 0.19913736979166666,
+    "p99": 3.0
+  },
+  {
+    "vibrance": 50,
+    "saturation": 50,
+    "max_error": 36,
+    "mean_error": 0.31231689453125,
+    "p99": 6.0
+  },
+  {
+    "vibrance": 100,
+    "saturation": 100,
+    "max_error": 69,
+    "mean_error": 0.51165771484375,
+    "p99": 9.0
+  },
+  {
+    "vibrance": -50,
+    "saturation": 50,
+    "max_error": 38,
+    "mean_error": 1.2073160807291667,
+    "p99": 12.0
+  },
+  {
+    "vibrance": 50,
+    "saturation": -50,
+    "max_error": 5,
+    "mean_error": 0.24985758463541666,
+    "p99": 3.0
+  },
+  {
+    "vibrance": -100,
+    "saturation": -100,
+    "max_error": 8,
+    "mean_error": 0.62060546875,
+    "p99": 3.0
+  }
+]
