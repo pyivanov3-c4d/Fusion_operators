@@ -38,7 +38,11 @@ If upgrading the earlier local development build, move `PavelSelectiveColor.fuse
 
 ### Use
 
-Select a family in **Colors**, then adjust its four CMYK sliders. Changing the menu preserves all other families' settings; all adjustments contribute to the image together. Relative is the default; Absolute generally produces stronger changes. Toggle Preview to compare with the original.
+Select a family using the **R Y G C B M W N K** button row (Reds, Yellows, Greens, Cyans, Blues, Magentas, Whites, Neutrals, Blacks). Hover a button for its full name. Switching families preserves all other families' settings; all adjustments contribute to the image together. Relative is the default; Absolute generally produces stronger changes. Toggle Preview to compare with the original.
+
+The sliders are labeled **Red/Cyan**, **Green/Magenta**, **Blue/Yellow**, and **White/Black**: negative values move toward the left-hand color, positive values toward the right-hand color. The original Photoshop value direction and saved input IDs are unchanged. Buttons use Fusion's native styling; custom colored lettering and rounded swatches are not included.
+
+Version 1.1 also restores the selected family's visible sliders when reopening compositions. After replacing the Fuse, click **Reload** on existing nodes or restart Fusion.
 
 For a simple check, an opaque RGB pixel of (180, 100, 50), with Reds / Cyan +60% / Absolute, becomes (132, 100, 50).
 
