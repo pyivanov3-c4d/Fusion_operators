@@ -2,6 +2,19 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_PhotoFilter
+
+Photoshop-style Photo Filter with preset selection, a color swatch, **Density**, and **Preserve Luminosity**.
+
+- Defaults: **Warming Filter (85)**, **Density 25%**, Preserve Luminosity on.
+- Selecting a filter updates the swatch below the dropdown.
+- Editing the swatch automatically selects **Custom**, the last dropdown option.
+- Includes Preview bypass, alpha handling, and optional linear-sRGB input processing.
+
+Download [PSN_PhotoFilter.fuse](Fuses/PSN_PhotoFilter.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_PhotoFilter**.
+
+Compared with Photoshop 27.2.0 across 24 test cases: maximum RGB difference was 1/255 with Preserve Luminosity off and 6/255 with it on. Non-default preset swatches are convenient approximations. See the [usage guide and validation details](docs/PSN_PhotoFilter.md).
+
 ## PSN_Threshold
 
 Photoshop-style black-and-white Threshold with **Threshold Level** from 1–255, default **128**. Includes Preview bypass, preserved alpha, and optional linear-sRGB input handling.
