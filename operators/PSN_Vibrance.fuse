@@ -1,0 +1,109 @@
+-- PSN_Vibrance 1.0: classic Photoshop-style Vibrance and Saturation.
+-- Curve adapted from Seth A. Robinson's MIT-licensed Patchy calibration.
+-- https://github.com/SethRobinson/Patchy/blob/main/docs/adjustment-kinds.md
+-- This is a fitted approximation of classic Vibrance, not Color and Vibrance.
+FuRegisterClass("PSN_Vibrance",CT_Tool,{
+    REGS_Name="PSN_Vibrance",REGS_Category="PSN\\Color",REGS_OpIconString="Vib",
+    REGS_OpDescription="Classic Photoshop-style Vibrance and Saturation",
+    REG_NoMotionBlurCtrls=true,
+})
+function Create()
+    InImage=self:AddInput("Input","Input",{LINKID_DataType="Image",LINK_Main=1,INP_AcceptsDoD=false})
+    OutImage=self:AddOutput("Output","Output",{LINKID_DataType="Image",LINK_Main=1})
+    InVibrance=self:AddInput("Vibrance","Vibrance",{
+        LINKID_DataType="Number",INPID_InputControl="SliderControl",INP_Default=0,INP_Integer=true,
+        INP_MinScale=-100,INP_MaxScale=100,INP_MinAllowed=-100,INP_MaxAllowed=100,
+    })
+    InSaturation=self:AddInput("Saturation","Saturation",{
+        LINKID_DataType="Number",INPID_InputControl="SliderControl",INP_Default=0,INP_Integer=true,
+        INP_MinScale=-100,INP_MaxScale=100,INP_MinAllowed=-100,INP_MaxAllowed=100,
+    })
+    InPreview=self:AddInput("Preview","Preview",{
+        LINKID_DataType="Number",INPID_InputControl="CheckboxControl",INP_Default=1,
+    })
+    self:BeginControlNest("Fusion Options","FusionOptions",false,{})
+    InSpace=self:AddInput("Input encoding","InputEncoding",{
+        LINKID_DataType="Number",INPID_InputControl="ComboControl",INP_Default=0,
+        {CCS_AddString="sRGB (Photoshop-style)"},{CCS_AddString="Linear sRGB / Rec.709 primaries"},
+    })
+    InAlpha=self:AddInput("Pre-Divide / Post-Multiply","PreDivide",{
+        LINKID_DataType="Number",INPID_InputControl="CheckboxControl",INP_Default=1,
+        INPS_StatusText="On for premultiplied RGB; off for straight RGB. Alpha is preserved.",
+    })
+    self:EndControlNest()
+end
+local pixel=function(x,y,p)
+    if p.A<=0 then return p end
+    local factor=premultiplied and p.A or 1
+    local original={p.R/factor,p.G/factor,p.B/factor}
+    local rgb={}
+    for i=1,3 do
+        local v=math.max(0,math.min(1,original[i]))
+        if not linear then v=v<=.04045 and v/12.92 or ((v+.055)/1.055)^2.4 end
+        rgb[i]=v
+    end
+    local high,low=math.max(rgb[1],rgb[2],rgb[3]),math.min(rgb[1],rgb[2],rgb[3])
+    if vibrance~=0 and high>0 and high>low then
+        local s=1-low/high
+        local a,b,c,d,h,t
+        if vibrance<0 then a,b,c,d,h,t=1.93,.863,1.136,.800,.0488,.740
+        else a,b,c,d,h,t=.890,1.623,2.663,.0669,.0747,1.102 end
+        local pivot=high*(1-a*(1-high)^b*s^c*(1-s)^d)
+        local dark=math.min(1,high/h)^t
+        local gain
+        if vibrance<0 then gain=1+vibrance*(1-.750*dark*s^1.788)
+        else
+            local weight=1
+            if rgb[1]==high then
+                local f=(rgb[2]+rgb[3]-2*low)/(high-low)
+                local depth=rgb[2]>=rgb[3] and math.max(0,math.min(1,(.740-f)/(.740-.522))) or 1-f
+                weight=1-.170*depth
+            end
+            gain=1+weight*.888*dark*vibrance^1.137*(1-s)^1.012*s^.597*high^(-.423)
+        end
+        for i=1,3 do rgb[i]=math.max(0,math.min(1,pivot+gain*(rgb[i]-pivot))) end
+    end
+    local gray=.288*rgb[1]+.712*rgb[2]
+    for i=1,3 do
+        local v=math.max(0,math.min(1,gray+(1+saturation)*(rgb[i]-gray)))
+        if not linear then v=v<=.0031308 and 12.92*v or 1.055*v^(1/2.4)-.055 end
+        rgb[i]=(v+original[i]-math.max(0,math.min(1,original[i])))*factor
+    end
+    p.R,p.G,p.B=rgb[1],rgb[2],rgb[3];return p
+end
+function Process(req)
+    local src=InImage:GetValue(req);if not src then return end
+    local v=math.max(-100,math.min(100,InVibrance:GetValue(req).Value))/100
+    local s=math.max(-100,math.min(100,InSaturation:GetValue(req).Value))/100
+    if InPreview:GetValue(req).Value<.5 or (v==0 and s==0) then OutImage:Set(req,src);return end
+    src:DownloadGPUMem(req)
+    local dst=Image({IMG_Like=src,IMG_Depth=8})
+    dst:MultiProcessPixels(nil,{vibrance=v,saturation=s,premultiplied=InAlpha:GetValue(req).Value>.5,
+        linear=InSpace:GetValue(req).Value>.5},0,0,src.Width,src.Height,src,pixel)
+    OutImage:Set(req,dst)
+end
+
+--[[ MIT license notice:
+MIT License
+
+Copyright (c) 2026 Seth A. Robinson
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+]]

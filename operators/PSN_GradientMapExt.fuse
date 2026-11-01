@@ -1,0 +1,126 @@
+-- PSN_GradientMapExt 1.0
+-- Photoshop-style Gradient Map with an external ramp. The gradient is not stored
+-- inside the operator: it is sampled from the second (green) input image.
+-- One full row of the ramp image is read left-to-right as gradient positions
+-- 0 (shadows) to 100 (highlights). Row 0 is the top row as shown in the viewer.
+FuRegisterClass("PSN_GradientMapExt", CT_Tool, {
+    REGS_Name = "PSN_GradientMapExt",
+    REGS_Category = "PSN\\Color",
+    REGS_OpIconString = "GMx",
+    REGS_OpDescription = "Photoshop-style Gradient Map using an external image row as the color ramp",
+    REG_NoMotionBlurCtrls = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false,
+})
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
+    })
+    InRamp = self:AddInput("Ramp", "Ramp", {
+        LINKID_DataType = "Image", LINK_Main = 2, INP_AcceptsDoD = false,
+    })
+    OutImage = self:AddOutput("Output", "Output", {LINKID_DataType = "Image", LINK_Main = 1})
+    InRow = self:AddInput("Ramp row (Y)", "RampRow", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 0, INP_Integer = true, INP_MinScale = 0, INP_MaxScale = 512,
+        INP_MinAllowed = 0,
+        INPS_StatusText = "Row of the ramp image to sample, counted from the top as shown in the viewer. 0 is the first (top) row. The full width maps gradient positions 0-100.",
+    })
+    InPreview = self:AddInput("Preview", "Preview", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+    })
+    InReverse = self:AddInput("Reverse", "Reverse", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 0,
+    })
+    self:BeginControlNest("Fusion Options", "FusionOptions", false, {})
+    InSpace = self:AddInput("Input encoding", "InputEncoding", {
+        LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
+        {CCS_AddString = "RGB as supplied (Photoshop-style)"},
+        {CCS_AddString = "Linear sRGB / Rec.709 primaries"},
+        INPS_StatusText = "Use RGB as supplied for gamma-encoded images. Linear option converts linear sRGB to sRGB for the mapping and back; it is not an ACES transform.",
+    })
+    InQuantize = self:AddInput("Match Photoshop 8-bit tones", "Match8Bit", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+        INPS_StatusText = "Quantize the brightness key to 256 steps before sampling the ramp, like Photoshop's 8-bit adjustment.",
+    })
+    InAlpha = self:AddInput("Pre-Divide / Post-Multiply", "PreDivide", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+        INPS_StatusText = "Unpremultiply before mapping color, then restore the original alpha. Disable for straight-alpha inputs.",
+    })
+    self:EndControlNest()
+end
+
+-- This callback has an isolated per-thread environment supplied by MultiProcessPixels.
+local processPixel = function(x, y, p)
+    local alpha = p.A
+    if unpremultiply and alpha <= 0 then return p end
+    local factor = unpremultiply and alpha or 1
+    local r, g, b = p.R / factor, p.G / factor, p.B / factor
+    if linear then
+        r = r <= 0.0031308 and 12.92*r or 1.055*r^(1/2.4)-0.055
+        g = g <= 0.0031308 and 12.92*g or 1.055*g^(1/2.4)-0.055
+        b = b <= 0.0031308 and 12.92*b or 1.055*b^(1/2.4)-0.055
+    end
+    -- Photoshop gradient map keys on calibrated luminance.
+    local yv = math.min(1, math.max(0, 0.30*r + 0.59*g + 0.11*b))
+    if quantize then yv = math.floor(yv*255 + 0.5)/255 end
+    if reverse then yv = 1 - yv end
+    -- Position 0.0 -> leftmost ramp pixel, 1.0 -> rightmost ramp pixel.
+    local pos = yv * (rw - 1)
+    local i = math.floor(pos)
+    local w = pos - i
+    if i > rw - 2 then i = rw - 2; w = 1 end
+    local j = i*3
+    local nr = ramp[j+1]*(1-w) + ramp[j+4]*w
+    local ng = ramp[j+2]*(1-w) + ramp[j+5]*w
+    local nb = ramp[j+3]*(1-w) + ramp[j+6]*w
+    if linear then
+        nr = nr <= 0.04045 and nr/12.92 or ((nr+0.055)/1.055)^2.4
+        ng = ng <= 0.04045 and ng/12.92 or ((ng+0.055)/1.055)^2.4
+        nb = nb <= 0.04045 and nb/12.92 or ((nb+0.055)/1.055)^2.4
+    end
+    p.R, p.G, p.B = nr*factor, ng*factor, nb*factor
+    return p
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    if not src then return end
+    local rampImg = InRamp:GetValue(req)
+    if InPreview:GetValue(req).Value < 0.5 or not rampImg then
+        OutImage:Set(req, src)
+        return
+    end
+    rampImg:DownloadGPUMem(req)
+    local rw, rh = rampImg.Width, rampImg.Height
+    if rw < 1 or rh < 1 then OutImage:Set(req, src); return end
+    -- Row is counted from the top of the viewer; Fusion rows grow upward.
+    local row = math.floor(InRow:GetValue(req).Value + 0.5)
+    row = math.min(rh - 1, math.max(0, row))
+    row = rh - 1 - row
+    -- Read the entire row as the gradient: x=0 is position 0, x=width-1 is 100.
+    local ramp = {}
+    local px = Pixel()
+    for x = 0, rw - 1 do
+        rampImg:GetPixel(x, row, px)
+        ramp[x*3+1] = math.min(1, math.max(0, px.R))
+        ramp[x*3+2] = math.min(1, math.max(0, px.G))
+        ramp[x*3+3] = math.min(1, math.max(0, px.B))
+    end
+    -- A one-pixel-wide ramp still needs two samples for the interpolator.
+    if rw == 1 then
+        ramp[4], ramp[5], ramp[6] = ramp[1], ramp[2], ramp[3]
+        rw = 2
+    end
+    src:DownloadGPUMem(req)
+    local dst = Image({IMG_Like = src})
+    dst:MultiProcessPixels(nil, {
+        ramp = ramp, rw = rw,
+        reverse = InReverse:GetValue(req).Value > 0.5,
+        quantize = InQuantize:GetValue(req).Value > 0.5,
+        linear = InSpace:GetValue(req).Value > 0.5,
+        unpremultiply = InAlpha:GetValue(req).Value > 0.5,
+    }, 0, 0, src.Width, src.Height, src, processPixel)
+    OutImage:Set(req, dst)
+end

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "fusion": {
+      "command": "C:\\Users\\Pavel\\Documents\\ChatGPT\\Fusion\\fusion-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["D:\\__Kimi\\Fusion\\Fusion__\\fusion-mcp\\server.py"],
+      "env": {}
+    }
+  }
+}
