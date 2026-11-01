@@ -1,0 +1,26 @@
+# Normalize line endings across machines: LF in repo, native in working copy
+* text=auto
+
+# Source and docs — always normalized
+*.fuse  text
+*.md    text
+*.py    text
+*.json  text
+*.txt   text
+
+# Windows batch files must keep CRLF to run correctly
+*.bat   text eol=crlf
+
+# Binary formats — never touch
+*.c4d   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.tif   binary
+*.tiff  binary
+*.exr   binary
+*.dpx   binary
+*.mov   binary
+*.mp4   binary
+*.zip   binary
+*.7z    binary
