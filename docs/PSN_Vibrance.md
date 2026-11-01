@@ -27,15 +27,15 @@ Compared actual Fusion Studio 20.0.0.50 renders with Photoshop 27.2.0 classic Vi
 - Combined controls: maximum difference **69/255** at Vibrance +100 / Saturation +100, principally near clipped channels. Mean error stayed below **1.21/255** in each tested combined case. The approximation is not suitable when exact Photoshop matching is required, especially with strong combined settings.
 - Neutral settings matched exactly. Additional checks passed for Preview bypass, premultiplied half-alpha, zero alpha, straight RGB, linear/sRGB consistency and saved/reopened slider values.
 
-Reports: [Photoshop comparison](../validation/vibrance-results.json) and [behavior results](../validation/vibrance-behavior-results.json). These measurements do not guarantee matching for other images, profiles, Photoshop versions or bit depths.
+Reports: `tests/vibrance/results.json` and `tests/vibrance/behavior-results.json`. These measurements do not guarantee matching for other images, profiles, Photoshop versions or bit depths.
 
 The implementation adapts a fitted linear-light curve from Patchy: the gain depends on saturation, maximum channel and hue; Saturation follows it. It does not reproduce Adobe's proprietary implementation exactly.
 
-To try the effect, connect an image and raise Vibrance from zero. Keep Saturation at zero initially to assess the selective adjustment.
+Local demo: `PSN_Vibrance-Demo.comp`, using `tests/SelectiveColor-Chart.png`, with neutral defaults.
 
 ## References and license
 
 - [Adobe: Vibrance adjustment](https://helpx.adobe.com/photoshop/using/adjust-vibrance.html)
-- [Seth A. Robinson's Patchy calibration](https://github.com/SethRobinson/Patchy/blob/main/docs/adjustment-kinds.md), and [MIT-licensed reference curve](https://github.com/SethRobinson/Patchy/blob/main/src/core/adjustment_layer.cpp). The copyright and license notice are embedded in the Fuse and retained in [MIT notice](../third-party/Patchy-MIT.txt).
+- [Seth A. Robinson's Patchy calibration](https://github.com/SethRobinson/Patchy/blob/main/docs/adjustment-kinds.md), and [MIT-licensed reference curve](https://github.com/SethRobinson/Patchy/blob/main/src/core/adjustment_layer.cpp). The copyright and license notice are embedded in the Fuse and retained in `third-party/Patchy-MIT.txt`.
 
 No Adobe source code is included.

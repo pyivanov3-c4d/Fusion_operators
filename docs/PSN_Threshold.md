@@ -15,10 +15,10 @@ Copy `PSN_Threshold.fuse` to `%APPDATA%\Blackmagic Design\Fusion\Fuses\` and res
 
 ## Validation
 
-Compared actual Fusion Studio 20.0.0.50 renders against Photoshop 27.2.0 Threshold exports using an 8-bit sRGB fixture containing a full gray ramp, red ramp and random colors. All 16,384 pixels matched exactly at each of nine levels: 1, 32, 64, 127, 128, 129, 192, 254 and 255. Additional render checks covered premultiplied half-alpha, linear sRGB input, Preview bypass and zero alpha. Report: [Threshold validation results](../validation/threshold-results.json).
+Compared actual Fusion Studio 20.0.0.50 renders against Photoshop 27.2.0 Threshold exports using an 8-bit sRGB fixture containing a full gray ramp, red ramp and random colors. All 16,384 pixels matched exactly at each of nine levels: 1, 32, 64, 127, 128, 129, 192, 254 and 255. Additional render checks covered premultiplied half-alpha, linear sRGB input, Preview bypass and zero alpha. Report: `tests/threshold/results.json`.
 
 This validates the tested 8-bit RGB workflow, not all Photoshop modes, profiles or 16/32-bit behavior. For comparisons, supply the same RGB working-space values; the node performs no ICC conversion. Fusion's normal mask and Blend controls can soften/mix the binary result.
 
-To try the effect, connect an image and move Threshold Level. Higher values make more of the image black.
+Local demo: `PSN_Threshold-Demo.comp` using `tests/SelectiveColor-Chart.png`.
 
 Reference: [Adobe adjustment and fill layers](https://helpx.adobe.com/ca/photoshop/desktop/create-manage-layers/color-adjustment-fill-layers/work-with-adjustment-and-fill-layers.html). Independently implemented and calibrated; no Adobe source code is included.

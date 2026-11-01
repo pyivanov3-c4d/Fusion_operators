@@ -20,7 +20,7 @@ For Photoshop comparisons, supply the same RGB values in the same working color 
 
 Tested in Fusion Studio 20.0.0.50 against actual Photoshop 27.2.0 adjustment-layer exports: 28 combinations covering neutral, extreme, intermediate and combined settings in both modes. The 256 × 64 fixture contains grayscale and red ramps plus random RGB colors. All Fusion PNG comparisons differed by at most **1 level out of 255 per channel**. This is a calibrated approximation, not a guarantee of bit-exact equivalence for all images, bit depths or Photoshop versions.
 
-Additional checks passed for premultiplied transparency, alpha preservation, Preview bypass, linear-sRGB processing, Legacy slider ranges, default PSN_ node naming and saved/reopened values. Results: [Photoshop comparison](../validation/brightness-contrast-results.json) and [alpha results](../validation/brightness-contrast-alpha-results.json).
+Additional checks passed for premultiplied transparency, alpha preservation, Preview bypass, linear-sRGB processing, Legacy slider ranges, default PSN_ node naming and saved/reopened values. Results: `tests/brightness/validation-results.json` and `tests/brightness/alpha-results.json`.
 
 The node uses multithreaded CPU processing with a cached floating-point curve; it is not a GPU kernel.
 
@@ -28,10 +28,9 @@ The node uses multithreaded CPU processing with a cached floating-point curve; i
 
 Copy `PSN_BrightnessContrast.fuse` to `%APPDATA%\Blackmagic Design\Fusion\Fuses\` and restart Fusion. Internal registry ID: `Fuse.PSN_BrightnessContrast`.
 
-Example starting settings: Brightness +25, Contrast +20. Reset both to zero for neutral output.
+Local demo: `PSN_BrightnessContrast-Demo.comp`, using `tests/SelectiveColor-Chart.png`. Demo settings are Brightness +25, Contrast +20; reset both to zero for neutral output.
 
 ## Research
 
 - [Adobe Brightness/Contrast documentation](https://helpx.adobe.com/photoshop/desktop/adjust-color/color-corrections/apply-brightness-and-contrast-adjustment.html)
-- [Seth A. Robinson's Patchy calibration research](https://github.com/SethRobinson/Patchy/blob/main/docs/adjustments-calibration.md), MIT licensed. Attribution and license are retained in the Fuse and [MIT notice](../third-party/Patchy-MIT.txt).
-
+- [Seth A. Robinson's Patchy calibration research](https://github.com/SethRobinson/Patchy/blob/main/docs/adjustments-calibration.md), MIT licensed. Attribution and license are retained in the Fuse and `third-party/Patchy-MIT.txt`.

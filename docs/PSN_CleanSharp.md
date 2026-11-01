@@ -20,8 +20,8 @@ Copy `PSN_CleanSharp.fuse` to `%APPDATA%\Blackmagic Design\Fusion\Fuses\` and re
 
 Tested in Fusion Studio 20.0.0.50 against Photoshop 27.2.0 using a 1000 × 720 chart. Radius 10 and 30, at 20% Overlay opacity, differed by at most 1/255 per RGB channel; radius 1 differed by at most 2/255. Intermediate High Pass differences were up to 2/255 at radius 10 and 30, and 20/255 at radius 1. Gaussian radius scaling is calibrated, but Photoshop's small-radius kernel and integer behavior are not reproduced exactly. Other images, radii, image boundaries and bit depths may differ more.
 
-Checks also passed for default values, unchanged flat colors, half-alpha flat images, neutral High Pass, zero-radius bypass, Preview bypass, and exact zero-intensity passthrough. Reports are in [Photoshop comparison](../validation/cleansharp-comparison.json) and [behavior results](../validation/cleansharp-behavior-results.json).
+Checks also passed for default values, unchanged flat colors, half-alpha flat images, neutral High Pass, zero-radius bypass, Preview bypass, and exact zero-intensity passthrough. Reports are in `tests/cleansharp/comparison.json` and `tests/cleansharp/behavior-results.json`.
 
-To try the effect, connect an image to the node and leave Radius at 10 and Intensity at 20. Toggle Show High Pass to inspect the detail layer.
+Local demo: `PSN_CleanSharp-Demo.comp`, using `tests/cleansharp/input.png`.
 
 Reference: [Adobe's High Pass sharpening workflow](https://www.adobe.com/creativecloud/photography/hub/guides/sharpen-image-high-pass-filter.html). Independent implementation; no Adobe source code is included.

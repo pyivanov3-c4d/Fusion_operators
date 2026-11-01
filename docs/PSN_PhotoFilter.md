@@ -30,14 +30,14 @@ Filtering uses sRGB linearization, Bradford-adapted XYZ D50 component attenuatio
 
 Tested in Fusion Studio 20.0.0.50 against Photoshop 27.2.0 with 24 cases: six custom colors, Density 25/100, and Preserve Luminosity off/on. The fixture has 16,384 pixels containing gray/red ramps and random colors. Maximum observed RGB difference was **1/255 with Preserve Luminosity off** and **6/255 with it on**, principally at gamut boundaries. Exact equivalence is not claimed for other colors, profiles or bit depths.
 
-Additional checks passed for defaults, preset/swatch synchronization, automatic Custom selection, reopening a custom color and migration from the old Filter/Color interface, alpha preservation, linear-sRGB processing, density-zero bypass and Preview bypass. Reports: [Photoshop comparison](../validation/photofilter-results.json) and [behavior results](../validation/photofilter-behavior-results.json).
+Additional checks passed for defaults, preset/swatch synchronization, automatic Custom selection, reopening a custom color and migration from the old Filter/Color interface, alpha preservation, linear-sRGB processing, density-zero bypass and Preview bypass. Reports: `tests/photofilter/results.json` and `tests/photofilter/behavior-results.json`.
 
-To try the effect, connect an image and select a filter. Edit the swatch below the dropdown to switch automatically to Custom.
+Local demo: `PSN_PhotoFilter-Demo.comp`, using `tests/SelectiveColor-Chart.png`.
 
 ## References
 
 - [Adobe: adjusting colors with Photo Filter](https://www.adobe.com/us/learn/photoshop/web/adjust-correct-color-balance-photoshop)
-- [Seth A. Robinson's Patchy calibration research](https://github.com/SethRobinson/Patchy/blob/main/docs/adjustment-kinds.md), MIT licensed; notice embedded in the Fuse and retained in [MIT notice](../third-party/Patchy-MIT.txt).
+- [Seth A. Robinson's Patchy calibration research](https://github.com/SethRobinson/Patchy/blob/main/docs/adjustment-kinds.md), MIT licensed; notice embedded in the Fuse and retained in `third-party/Patchy-MIT.txt`.
 
 Independent implementation; no Adobe source code is included.
 
