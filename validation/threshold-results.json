@@ -1,0 +1,55 @@
+{
+  "photoshop_comparisons": [
+    {
+      "level": 1,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 32,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 64,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 127,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 128,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 129,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 192,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 254,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    },
+    {
+      "level": 255,
+      "pixels": 16384,
+      "mismatched_pixels": 0
+    }
+  ],
+  "behavior_checks": [
+    "premultiplied alpha",
+    "linear sRGB",
+    "Preview bypass",
+    "zero alpha"
+  ]
+}

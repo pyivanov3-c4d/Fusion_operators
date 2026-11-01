@@ -1,0 +1,44 @@
+[
+  {
+    "radius": 1,
+    "high_pass": false,
+    "max_error": 2.0,
+    "mean_error": 0.08075833333333333,
+    "p99": 1.0
+  },
+  {
+    "radius": 1,
+    "high_pass": true,
+    "max_error": 20.0,
+    "mean_error": 0.7918337962962962,
+    "p99": 8.0
+  },
+  {
+    "radius": 10,
+    "high_pass": false,
+    "max_error": 1.0,
+    "mean_error": 0.2749476851851852,
+    "p99": 1.0
+  },
+  {
+    "radius": 10,
+    "high_pass": true,
+    "max_error": 2.0,
+    "mean_error": 0.5872212962962963,
+    "p99": 2.0
+  },
+  {
+    "radius": 30,
+    "high_pass": false,
+    "max_error": 1.0,
+    "mean_error": 0.4257662037037037,
+    "p99": 1.0
+  },
+  {
+    "radius": 30,
+    "high_pass": true,
+    "max_error": 2.0,
+    "mean_error": 0.5149930555555555,
+    "p99": 1.0
+  }
+]

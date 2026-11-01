@@ -1,0 +1,9 @@
+{
+  "alpha_preserved": true,
+  "zero_alpha_preserved": true,
+  "preview_bypass": true,
+  "straight_matches_opaque": true,
+  "linear_max_byte_error": 0.5395056156975073,
+  "save_reopen": true,
+  "neutral_exact": true
+}

@@ -1,0 +1,8 @@
+{
+  "flat": 0.5,
+  "alpha": 0.5,
+  "highpass": 0.5,
+  "radius_zero": 0.5,
+  "preview_off": 0.5,
+  "intensity_zero_exact": true
+}

@@ -1,0 +1,314 @@
+[
+  {
+    "case": {
+      "color": [
+        236,
+        138,
+        0
+      ],
+      "density": 25,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.0133056640625
+  },
+  {
+    "case": {
+      "color": [
+        236,
+        138,
+        0
+      ],
+      "density": 25,
+      "preserve": true
+    },
+    "max_error": 5,
+    "mean_error": 0.057047526041666664
+  },
+  {
+    "case": {
+      "color": [
+        236,
+        138,
+        0
+      ],
+      "density": 100,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.012166341145833334
+  },
+  {
+    "case": {
+      "color": [
+        236,
+        138,
+        0
+      ],
+      "density": 100,
+      "preserve": true
+    },
+    "max_error": 3,
+    "mean_error": 0.11968994140625
+  },
+  {
+    "case": {
+      "color": [
+        0,
+        109,
+        255
+      ],
+      "density": 25,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.01190185546875
+  },
+  {
+    "case": {
+      "color": [
+        0,
+        109,
+        255
+      ],
+      "density": 25,
+      "preserve": true
+    },
+    "max_error": 3,
+    "mean_error": 0.07002766927083333
+  },
+  {
+    "case": {
+      "color": [
+        0,
+        109,
+        255
+      ],
+      "density": 100,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.012227376302083334
+  },
+  {
+    "case": {
+      "color": [
+        0,
+        109,
+        255
+      ],
+      "density": 100,
+      "preserve": true
+    },
+    "max_error": 6,
+    "mean_error": 0.16265869140625
+  },
+  {
+    "case": {
+      "color": [
+        172,
+        122,
+        51
+      ],
+      "density": 25,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.011881510416666666
+  },
+  {
+    "case": {
+      "color": [
+        172,
+        122,
+        51
+      ],
+      "density": 25,
+      "preserve": true
+    },
+    "max_error": 2,
+    "mean_error": 0.044718424479166664
+  },
+  {
+    "case": {
+      "color": [
+        172,
+        122,
+        51
+      ],
+      "density": 100,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.0155029296875
+  },
+  {
+    "case": {
+      "color": [
+        172,
+        122,
+        51
+      ],
+      "density": 100,
+      "preserve": true
+    },
+    "max_error": 3,
+    "mean_error": 0.06856282552083333
+  },
+  {
+    "case": {
+      "color": [
+        255,
+        0,
+        0
+      ],
+      "density": 25,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.011474609375
+  },
+  {
+    "case": {
+      "color": [
+        255,
+        0,
+        0
+      ],
+      "density": 25,
+      "preserve": true
+    },
+    "max_error": 4,
+    "mean_error": 0.08148193359375
+  },
+  {
+    "case": {
+      "color": [
+        255,
+        0,
+        0
+      ],
+      "density": 100,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.00921630859375
+  },
+  {
+    "case": {
+      "color": [
+        255,
+        0,
+        0
+      ],
+      "density": 100,
+      "preserve": true
+    },
+    "max_error": 3,
+    "mean_error": 0.20835367838541666
+  },
+  {
+    "case": {
+      "color": [
+        40,
+        190,
+        80
+      ],
+      "density": 25,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.013956705729166666
+  },
+  {
+    "case": {
+      "color": [
+        40,
+        190,
+        80
+      ],
+      "density": 25,
+      "preserve": true
+    },
+    "max_error": 5,
+    "mean_error": 0.11600748697916667
+  },
+  {
+    "case": {
+      "color": [
+        40,
+        190,
+        80
+      ],
+      "density": 100,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.0169677734375
+  },
+  {
+    "case": {
+      "color": [
+        40,
+        190,
+        80
+      ],
+      "density": 100,
+      "preserve": true
+    },
+    "max_error": 4,
+    "mean_error": 0.0938720703125
+  },
+  {
+    "case": {
+      "color": [
+        128,
+        128,
+        128
+      ],
+      "density": 25,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.007222493489583333
+  },
+  {
+    "case": {
+      "color": [
+        128,
+        128,
+        128
+      ],
+      "density": 25,
+      "preserve": true
+    },
+    "max_error": 2,
+    "mean_error": 0.036234537760416664
+  },
+  {
+    "case": {
+      "color": [
+        128,
+        128,
+        128
+      ],
+      "density": 100,
+      "preserve": false
+    },
+    "max_error": 1,
+    "mean_error": 0.0155029296875
+  },
+  {
+    "case": {
+      "color": [
+        128,
+        128,
+        128
+      ],
+      "density": 100,
+      "preserve": true
+    },
+    "max_error": 2,
+    "mean_error": 0.042460123697916664
+  }
+]
