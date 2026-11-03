@@ -2,6 +2,12 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_SplineArrange
+
+A particle-emitter-style generator that arranges copies of a Sample RGBA image along a **Shape mask/image, thin open stroke, or optional Polyline path**. Controls: **Density** (100 by default, maximum 1000), **Color** (RGB multiply, alpha opacity), **Random Color**, **Size**, **Random Size**, **Random Position** (sideways along the path normal), an editable **Along Size** five-point profile, **Aligned** (rotate copies to the tangent), and **Normal / Additive / Multiply** blending. Connect a Polygon, Ellipse, mask, open stroke (including a 1 px open polygon line), or any image to the first input; its outline or centreline is traced. The output uses the Sample's frame size.
+
+Download [PSN_SplineArrange.fuse](Fuses/PSN_SplineArrange.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_SplineArrange**. Tested live in Fusion Studio 20.0.0.50 with Ellipse and Polygon mask inputs, Density 0–100, random color/size, and all three blend modes. See the [usage guide and validation details](docs/PSN_SplineArrange.md).
+
 ## PSN_Vibrance
 
 An approximation of Photoshop's **classic Vibrance**, with **Vibrance** and **Saturation** sliders from −100 to +100, both defaulting to 0. Includes Preview bypass, preserved alpha, and optional linear-sRGB input handling.
