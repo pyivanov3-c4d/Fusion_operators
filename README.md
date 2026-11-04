@@ -2,6 +2,14 @@
 
 Custom Photoshop-style operators for Blackmagic Fusion, using the **PSN_** naming convention.
 
+## PSN_FigmaAdjustment
+
+Figma-style image adjustments: the seven sliders of Figma's image **Adjust** panel — **Exposure, Contrast, Saturation, Temperature, Tint, Highlights, Shadows** — each −100…+100 and neutral at 0. Includes Preview bypass, preserved alpha, and optional linear-sRGB input handling.
+
+Download [PSN_FigmaAdjustment.fuse](Fuses/PSN_FigmaAdjustment.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_FigmaAdjustment**.
+
+Figma does not publish the shader behind its sliders, so this reproduces the control set, the ranges and the documented behaviour of each slider on a defined photographic model instead of claiming pixel parity. Validated in Fusion 20 against an independent model: 23 parameter cases within 1/255 per channel, bit-exact passthrough at neutral, alpha preserved, clean console. See the [usage guide and validation details](docs/PSN_FigmaAdjustment.md).
+
 ## PSN_SplineArrange
 
 A particle-emitter-style generator that arranges copies of a Sample RGBA image along a **Shape mask/image, thin open stroke, or optional Polyline path**. Controls: **Density** (100 by default, maximum 1000), **Color** (RGB multiply, alpha opacity), **Random Color**, **Size**, **Random Size**, **Random Position** (sideways along the path normal), an editable **Along Size** five-point profile, **Aligned** (rotate copies to the tangent), and **Normal / Additive / Multiply** blending. Connect a Polygon, Ellipse, mask, open stroke (including a 1 px open polygon line), or any image to the first input; its outline or centreline is traced. The output uses the Sample's frame size.
