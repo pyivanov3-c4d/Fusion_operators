@@ -1,81 +1,69 @@
-﻿# PSN_FigmaAdjustment
+# PSN_FigmaAdjustment 3.0
 
-Figma-style image adjustments for Fusion Studio. It reproduces the seven sliders of **Figma's image Adjust panel** â€” Exposure, Contrast, Saturation, Temperature, Tint, Highlights, Shadows â€” in Figma's order, using Figma's own maths, measured from Figma's renderer.
+Figma's seven image adjustments for Fusion Studio: **Exposure, Contrast, Saturation, Temperature, Tint, Highlights, Shadows**, in Figma's order. All sliders range from -100 to +100 and default to zero.
 
-Add it with **Shift+Space**, search **PSN_FigmaAdjustment**, and connect an image. The house `PSN_` prefix covers the tool name, file name and registry ID (`Fuse.PSN_FigmaAdjustment`).
+Add with **Shift+Space → PSN_FigmaAdjustment**. Existing nodes need **Reload**, or add a fresh instance. Registry ID `Fuse.PSN_FigmaAdjustment` and existing input IDs remain unchanged.
 
-| Slider | Range | Figma's operation (measured) |
-| --- | --- | --- |
-| Exposure | âˆ’100 â€¦ +100 | Tone curve on CIELAB L\*; compresses chroma as it lifts |
-| Contrast | âˆ’100 â€¦ +100 | L\* only; negative mutes toward mid-grey |
-| Saturation | âˆ’100 â€¦ +100 | Chroma scale in CIELAB; âˆ’100 is grey, L\* preserved |
-| Temperature | âˆ’100 â€¦ +100 | **b\* += 29.3** at +100 (cool â†’ warm) |
-| Tint | âˆ’100 â€¦ +100 | **a\* += 29.3** at +100 (green â†’ magenta) |
-| Highlights | âˆ’100 â€¦ +100 | L\* only, acting above L\* 53.6 |
-| Shadows | âˆ’100 â€¦ +100 | L\* only, acting below L\* 53.6 |
+## Version 3 changes
 
-All seven default to 0, and all-zero is a bit-exact passthrough.
+The old fitted curves are replaced by the adjustment mathematics verified from Figma's renderer and checked against its exports. Version 2's saturated-color errors, incorrect saturation model, and unused input-encoding option are fixed. Reloading an old node changes its result to the corrected behavior.
 
-## How this was derived
+Processing order:
+1. Decode RGB with Figma's 2.2 gamma curve.
+2. Calculate Highlights/Shadows weights from the original luminance.
+3. Apply Temperature, Tint, and Contrast in simplified cube-root Lab space.
+4. Apply Exposure plus the local tonal contribution, including negative-exposure color compensation.
+5. Apply Saturation in RGB with the positive-saturation gamut limits.
+6. Encode RGB and optionally round to Figma's 8-bit output values.
 
-Figma does not document the maths, so the behaviour was measured directly. A development plugin created an image fill, set `paint.filters` to exact values and exported each result 1:1 with `exportAsync` â€” 93 reference renders (7 sliders Ã— 13 values, plus two combined looks) on a chart holding grey, R, G and B ramps and eight colour patches.
+This is an independently written Fusion implementation. No Figma binaries or shader source are included in the operator.
 
-Findings that drove the rebuild:
+## Verification — 2026-11-05
 
-- The plugin API rejects filter values outside **âˆ’1â€¦1**, so the sliders are normalised. This node's âˆ’100â€¦100 maps by `/100`.
-- The adjustments are **CIELAB (D65)**, not RGB gamma. Temperature moves b\* by a constant 29.3 across lightness levels and across hues; tint moves a\* the same way; L\* and the other axis stay put.
-- **Contrast, Highlights and Shadows touch L\* only** â€” a\*/b\* are unchanged. Highlights are zero for L\* â‰¤ 53.6, shadows zero for L\* â‰¥ 53.6.
-- **Saturation** scales chroma with L\* fixed; at âˆ’100 the result is the L\*-preserving grey (which is why it equals linear-light Rec.709 luma).
-- **Exposure is a luminance gain plus a lift proportional to luminance** in linear light, fitted from Figma's renders (lift 0 at neutral and below, rising to 3.0 at +100), which is why it desaturates in both directions: a lifted pure green becomes near-white in Figma, not a brighter green. The node reproduces that by clamping chroma to the sRGB gamut boundary at the adjusted L\* (measured: this is what Figma's exposure does to most saturated colours).
+Tested in Fusion Studio 20.0.0.50 against 93 archived Figma Desktop exports, 43 new dense-chart exports, and 20 additional combined settings. The dense chart contains a 17×17×17 RGB lattice, a 256-step gray ramp, and 3,023 independent random colors.
 
-The L\* curves for Exposure, Contrast, Highlights and Shadows are baked from the measurements (51 knots of L\*) and interpolated at render time, so the node follows Figma's actual curve shape rather than an invented one.
+**156 image comparisons; 4,325,376 pixels.** Each slider was checked separately, with combined positive/negative extremes and randomized settings.
 
-## Accuracy against Figma
+| Adjustment | Previous max error | Version 3 max error |
+| --- | ---: | ---: |
+| Exposure | 122 | 1 |
+| Contrast | 25 | 1 |
+| Saturation | 115 | 1 |
+| Temperature | 25 | 1 |
+| Tint | 33 | 1 |
+| Highlights | 136 | 1 |
+| Shadows | 46 | 1 |
+| Combinations | 90 | 1 |
 
-Rendered in Fusion 20 with this Fuse and compared pixel for pixel with the 93 Figma exports:
+Errors are in 8-bit levels (0–255), with Figma 8-bit rounding enabled. All compared alpha values match. Exact RGB channel matches: **99.98325%** on the new dense suite, **99.99715%** on combined settings, and **98.37487%** across all suites including the older desktop exports.
 
-| Slider | mean error | max error |
-| --- | --- | --- |
-| Contrast | 1.7 levels | 25 |
-| Temperature | 1.6 levels | 25 |
-| Tint | 1.5 levels | 33 |
-| Highlights | 1.5 levels | 136 |
-| Shadows | 1.8 levels | 46 |
-| Saturation | 4.1 levels | 115 |
-| Exposure | 5.4 levels overall (1.7–1.9 below 0, 5–29 above) | 122 |
+**Not universally bit-for-bit identical:** the largest measured difference is 1/255. Figma Desktop and Figma's connector themselves differ by one level on a controlled cross-check; Fusion matched that connector image exactly. Renderer precision and output quantization affect the last bit. Finite tests do not prove equality for every possible image and setting.
 
-The grey axis and ordinary colours match to 1â€“2 levels, and exposure now desaturates as it lifts instead of getting more vivid. The remaining exposure gap is on **saturated** colours: measured Figma lifts them much further than the neutral tone curve implies (blue 64 -> (10,10,171) at +50, where an L\* curve gives (26,24,87)), and no simple model â€” gain, additive light, luminance scaling, L\* curve, gamut clamp, or soft gamut clamp â€” reproduced it across the ramps. Figma's exact exposure operator is not public. Closing this needs a dense colour-grid capture from Figma and a fitted model.
+Reports: [render comparisons](../validation/figma-adjustment-results.json), [version 2 baseline](../validation/figma-adjustment-v2-baseline.json), and [behavior checks](../validation/figma-adjustment-behavior-results.json). The final report records the tested source hash.
 
-## Color and transparency
+Additional checks cover premultiplied/straight RGB, zero alpha, linear input, exact neutral/bypass behavior, saved defaults, and composition reopening. No Fuse errors occurred during validation.
 
-**RGB as supplied** is the default and matches Figma, which treats image fills as gamma-encoded. **Linear sRGB / Rec.709 primaries** treats input as linear and returns linear; it is not an ACES or camera-log transform.
+## Fusion options
 
-**Pre-Divide / Post-Multiply** is on by default for premultiplied images. Alpha is preserved. Out-of-range RGB residuals are preserved, so float comps are not clipped by an SDR adjustment.
+- **RGB as supplied (default):** ordinary gamma-encoded images; no automatic profile conversion.
+- **Linear sRGB / Rec.709 primaries:** converts linear RGB to sRGB encoding before processing, then back. Not an ACES or camera-log transform.
+- **Pre-Divide / Post-Multiply (default on):** handles premultiplied RGB and preserves alpha. Turn off for straight RGB.
+- **Figma 8-bit rounding (default on):** rounds adjusted encoded RGB to 256 levels for closer PNG matching. Turn off to retain floating-point precision for downstream grading. Alpha is not quantized by the operator.
 
-## Validation
-
-- 93 Figma reference renders and 93 Fusion renders compared pixel for pixel (`figma_probe/out` and `figma_probe/fusion`).
-- All-zero is a bit-exact passthrough; Preview bypass is exact.
-- Clean Fusion console (no Lua errors or warnings from the node).
-- Curve tables are interpolated, not sampled per pixel, and the conversion runs through cached transfer LUTs.
-
-## Limits
-
-- Extreme saturated colours differ from Figma because of its unpublished out-of-gamut conversion.
-- No crop/fill-mode/rotation controls â€” colour adjustments only.
-- Multithreaded CPU implementation with a CIELAB conversion per pixel; heavier than an RGB LUT, suitable for stills and short shots.
+**Preview off** and **all-zero controls** pass the image through unchanged, including floating-point precision. Out-of-range RGB residuals are retained; Figma matching is validated for SDR inputs in 0–1.
 
 ## Installation
 
-Copy `PSN_FigmaAdjustment.fuse` to `%APPDATA%\Blackmagic Design\Fusion\Fuses\` and restart Fusion. Registry ID: `Fuse.PSN_FigmaAdjustment`.
+Copy [PSN_FigmaAdjustment.fuse](../Fuses/PSN_FigmaAdjustment.fuse) to:
+`%APPDATA%\Blackmagic Design\Fusion\Fuses\`
 
-Local demo: `PSN_FigmaAdjustment-Demo.comp` in the project root, using `tests/SelectiveColor-Chart.png`.
+Restart Fusion or reload existing nodes. The existing registry and input IDs are preserved.
 
-## Research
+## References
 
-- [Figma Learn: Adjust the properties of an image](https://help.figma.com/hc/en-us/articles/360041098433-Adjust-the-properties-of-an-image)
-- Figma plugin API `ImageFilters` interface and the Figma REST schema (same seven fields, range âˆ’1â€¦1)
-- Measurement harness and findings: `figma_probe/` in the working session (`FINDINGS.md`, plugin, upload server, 93 exports)
+- [Figma image adjustments](https://help.figma.com/hc/en-us/articles/360041098433-Adjust-the-properties-of-an-image)
+- [Figma image paint API](https://developers.figma.com/docs/plugins/api/Paint/)
+- [Verification file](https://www.figma.com/design/DlRkFPvaehe1Q1dTM9uQFO/Untitled?node-id=6-2)
 
-Not affiliated with or endorsed by Figma. No Figma code is included; the model is an independent implementation derived from measurements.
+Not affiliated with or endorsed by Figma.
 

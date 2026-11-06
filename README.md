@@ -8,7 +8,7 @@ Figma-style image adjustments: the seven sliders of Figma's image **Adjust** pan
 
 Download [PSN_FigmaAdjustment.fuse](Fuses/PSN_FigmaAdjustment.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`, restart Fusion, then use **Shift+Space → PSN_FigmaAdjustment**.
 
-Figma does not publish the shader behind its sliders, so this reproduces the control set, the ranges and the documented behaviour of each slider on a defined photographic model instead of claiming pixel parity. Validated in Fusion 20 against an independent model: 23 parameter cases within 1/255 per channel, bit-exact passthrough at neutral, alpha preserved, clean console. See the [usage guide and validation details](docs/PSN_FigmaAdjustment.md).
+Version **3.0** replaces the fitted model with verified Figma adjustment mathematics and adds optional **Figma 8-bit rounding** (enabled by default). Tested live in Fusion 20 against **156 Figma exports / 4,325,376 pixels**: maximum RGB difference **1/255**, exact alpha, and **98.37487%** exact RGB channels. Strict bit-for-bit equality is not claimed; Figma Desktop and the connector also showed one-level differences. Neutral and Preview bypass remain exact. See the [usage guide and validation details](docs/PSN_FigmaAdjustment.md).
 
 ## PSN_SplineArrange
 
