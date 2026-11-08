@@ -1,0 +1,536 @@
+-- PSN_LUT 1.0
+-- Photoshop-style Color Lookup for Fusion 20: applies a .cube LUT to the input
+-- image. The bundled free LUT packs are listed by category in one dropdown.
+--
+-- .cube parsing (1D and 3D), the lookup and the interpolation are implemented
+-- here; no third-party LUT library and no Adobe code is used.
+--
+-- Install:  %APPDATA%\Blackmagic Design\Fusion\Fuses\PSN_LUT.fuse
+-- Category: PSN\Color
+
+FuRegisterClass("PSN_LUT", CT_Tool, {
+    REGS_Name = "PSN_LUT",
+    REGS_Category = "PSN\\Color",
+    REGS_OpIconString = "LUT",
+    REGS_OpDescription = "Color Lookup: applies a .cube LUT, with the bundled free LUT packs",
+    REGS_HelpTopic = "Tools/PSN/LUT",
+    REG_NoMotionBlurCtrls = true,
+})
+
+-- ---------------------------------------------------------------- LUT library
+
+-- The list is scanned once when Fusion starts: the workspace packs first, then
+-- the user's own Fusion LUTs folder.
+local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\samples\luts]]
+local LUT_USER_FOLDER = ((os.getenv("APPDATA") or "") .. "\\Blackmagic Design\\Fusion\\LUTs")
+
+local LUT_FILES = {}
+
+local function scanFolder(root, prefix)
+    if not root or root == "" then return end
+    local p = io.popen('cmd /c dir /b /s "' .. root .. '\\*.cube" 2>nul')
+    if not p then return end
+    local base = (root .. "\\"):upper()
+    local found = {}
+    for line in p:lines() do
+        line = line:gsub("%s+$", "")
+        if line ~= "" then
+            local rel = line
+            local up = line:upper()
+            if up:sub(1, #base) == base then rel = line:sub(#base + 1) end
+            rel = rel:gsub("\\", "/"):gsub("%.[^/]+$", "")
+            found[#found + 1] = {
+                label = (prefix and (prefix .. "/") or "") .. rel,
+                path = line,
+            }
+        end
+    end
+    p:close()
+    table.sort(found, function(a, b) return a.label:lower() < b.label:lower() end)
+    for _, entry in ipairs(found) do LUT_FILES[#LUT_FILES + 1] = entry end
+end
+
+scanFolder(LUT_FOLDER_DEFAULT, nil)
+scanFolder(LUT_USER_FOLDER, "user")
+
+local DEFAULT_LUT_LABEL = "slay-04-film"
+
+local function findLutLabel(label)
+    for i, entry in ipairs(LUT_FILES) do
+        if entry.label == label then return i end
+    end
+    return 0
+end
+
+-- ---------------------------------------------------------------- .cube parser
+
+local CACHE = {}
+
+local function parseCube(path)
+    local fh = io.open(path, "rb")
+    if not fh then return nil, "cannot open file" end
+    local data = fh:read("*a") or ""
+    fh:close()
+    if data:sub(1, 3) == "\239\187\191" then data = data:sub(4) end
+    if #data < 16 then return nil, "file is empty" end
+
+    local n1, n3
+    local dmin = { 0, 0, 0 }
+    local dmax = { 1, 1, 1 }
+    local nums, count = {}, 0
+
+    for line in data:gmatch("[^\r\n]+") do
+        local body = line:gsub("#.*$", "")
+        body = body:gsub("^%s+", ""):gsub("%s+$", "")
+        if body ~= "" then
+            local up = body:upper()
+            if up:sub(1, 11) == "LUT_3D_SIZE" then
+                n3 = math.floor(tonumber(up:match("LUT_3D_SIZE%s+([%d%.eE+-]+)")) or 0)
+            elseif up:sub(1, 11) == "LUT_1D_SIZE" then
+                n1 = math.floor(tonumber(up:match("LUT_1D_SIZE%s+([%d%.eE+-]+)")) or 0)
+            elseif up:sub(1, 10) == "DOMAIN_MIN" then
+                local a, b, c = up:match("DOMAIN_MIN%s+(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)")
+                if a then dmin = { tonumber(a), tonumber(b), tonumber(c) } end
+            elseif up:sub(1, 10) == "DOMAIN_MAX" then
+                local a, b, c = up:match("DOMAIN_MAX%s+(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)")
+                if a then dmax = { tonumber(a), tonumber(b), tonumber(c) } end
+            elseif up:sub(1, 18) == "LUT_3D_INPUT_RANGE" then
+                local a, b = up:match("LUT_3D_INPUT_RANGE%s+(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)")
+                if a then
+                    dmin = { tonumber(a), tonumber(a), tonumber(a) }
+                    dmax = { tonumber(b), tonumber(b), tonumber(b) }
+                end
+            elseif up:sub(1, 5) == "TITLE" then
+                -- cosmetic, ignored
+            else
+                local a, b, c = body:match("^(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)%s+(%-?[%d%.eE+-]+)")
+                if a then
+                    nums[count + 1] = tonumber(a)
+                    nums[count + 2] = tonumber(b)
+                    nums[count + 3] = tonumber(c)
+                    count = count + 3
+                end
+            end
+        end
+    end
+
+    n1 = (n1 and n1 > 0) and n1 or nil
+    n3 = (n3 and n3 > 0) and n3 or nil
+    if not n1 and not n3 then return nil, "no LUT_1D_SIZE or LUT_3D_SIZE" end
+
+    local want = 0
+    if n1 then want = want + n1 * 3 end
+    if n3 then want = want + n3 * n3 * n3 * 3 end
+    if count < want then
+        return nil, string.format("truncated data: %d of %d values", count, want)
+    end
+
+    local lut = { dmin = dmin, dmax = dmax, n1 = n1, n3 = n3, entries = count / 3 }
+    local pos = 1
+
+    if n1 then
+        lut.r1, lut.g1, lut.b1 = {}, {}, {}
+        for i = 1, n1 do
+            lut.r1[i], lut.g1[i], lut.b1[i] = nums[pos], nums[pos + 1], nums[pos + 2]
+            pos = pos + 3
+        end
+    end
+    if n3 then
+        local total = n3 * n3 * n3
+        lut.r3, lut.g3, lut.b3 = {}, {}, {}
+        for i = 1, total do
+            lut.r3[i], lut.g3[i], lut.b3[i] = nums[pos], nums[pos + 1], nums[pos + 2]
+            pos = pos + 3
+        end
+    end
+
+    if n3 and n1 then
+        lut.desc = string.format("%dx%dx%d cube + %d 1D", n3, n3, n3, n1)
+    elseif n3 then
+        lut.desc = string.format("%dx%dx%d cube", n3, n3, n3)
+    else
+        lut.desc = string.format("%d 1D", n1)
+    end
+
+    return lut
+end
+
+local function loadLUT(path)
+    local hit = CACHE[path]
+    if hit then return hit end
+    local lut, err = parseCube(path)
+    if not lut then
+        hit = { error = err or "unreadable" }
+        CACHE[path] = hit
+        print("PSN_LUT: cannot load " .. tostring(path) .. " (" .. tostring(err) .. ")")
+        return hit
+    end
+    CACHE[path] = lut
+    print(string.format("PSN_LUT: %s  %s, %d entries", path, lut.desc, lut.entries))
+    return lut
+end
+
+local function domainSlope(lut, channel, n)
+    if not n or n < 2 then return 0 end
+    local span = lut.dmax[channel] - lut.dmin[channel]
+    if span == 0 then return 0 end
+    return (n - 1) / span
+end
+
+-- ---------------------------------------------------------------- UI
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image",
+        LINK_Main = 1,
+        INP_AcceptsDoD = false,
+    })
+    OutImage = self:AddOutput("Output", "Output", {
+        LINKID_DataType = "Image",
+        LINK_Main = 1,
+    })
+
+    local lutOpts = {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "ComboControl",
+        INP_Default = findLutLabel(DEFAULT_LUT_LABEL),
+        INP_Integer = true,
+        INP_DoNotifyChanged = true,
+        INP_InitialNotify = false,
+        INPS_StatusText = "LUTs found in the LUT folder when Fusion started; the file field below shows the active LUT.",
+    }
+    lutOpts[#lutOpts + 1] = { CCS_AddString = "(file below)" }
+    for _, entry in ipairs(LUT_FILES) do
+        lutOpts[#lutOpts + 1] = { CCS_AddString = entry.label }
+    end
+    InLutSel = self:AddInput("LUT", "LutSel", lutOpts)
+
+    InLutFile = self:AddInput("LUT file", "LutFile", {
+        LINKID_DataType = "Text",
+        INPID_InputControl = "FileControl",
+        INPS_DefaultText = (LUT_FILES[findLutLabel(DEFAULT_LUT_LABEL)] or {}).path or "",
+        INP_DoNotifyChanged = true,
+        INP_InitialNotify = false,
+        INPS_StatusText = "Shows the active LUT. Type or browse for a .cube outside the list; the menu then switches to (file below).",
+    })
+
+    InMix = self:AddInput("Mix", "Mix", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "SliderControl",
+        INP_Default = 100,
+        INP_MinScale = 0, INP_MaxScale = 100,
+        INP_MinAllowed = 0, INP_MaxAllowed = 100,
+        INPS_StatusText = "Amount of the LUT in the image, blended in the LUT's own encoding.",
+    })
+
+    InPreview = self:AddInput("Preview", "Preview", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "CheckboxControl",
+        INP_Default = 1,
+    })
+
+    self:BeginControlNest("Fusion Options", "FusionOptions", false, {})
+    InSpace = self:AddInput("Input encoding", "InputEncoding", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "ComboControl",
+        INP_Default = 0,
+        { CCS_AddString = "Display-referred (values as supplied)" },
+        { CCS_AddString = "Linear (sRGB encode/decode around the LUT)" },
+        INPS_StatusText = "The bundled packs are display-referred, so the LUT reads the values Fusion supplies. Use the linear option for a linear-light comp: the image is encoded to sRGB before the LUT and decoded after it.",
+    })
+    InInterp = self:AddInput("Interpolation", "Interpolation", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "ComboControl",
+        INP_Default = 0,
+        { CCS_AddString = "Tetrahedral" },
+        { CCS_AddString = "Trilinear" },
+        INPS_StatusText = "Tetrahedral keeps neutrals and colour edges cleaner. Trilinear matches tools that interpolate the cube corners directly.",
+    })
+    InOverRange = self:AddInput("Preserve over-range", "PreserveOverRange", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "CheckboxControl",
+        INP_Default = 1,
+        INPS_StatusText = "Keeps HDR and negative values outside 0-1 instead of clipping them at the LUT's edge.",
+    })
+    InAlpha = self:AddInput("Pre-Divide / Post-Multiply", "PreDivide", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "CheckboxControl",
+        INP_Default = 1,
+        INPS_StatusText = "On for premultiplied RGB, off for straight RGB. Alpha is preserved.",
+    })
+    self:EndControlNest()
+
+    self:BeginControlNest("LUT library", "LutLibrary", false, {})
+    InLutFolder = self:AddInput("LUT folder", "LutFolder", {
+        LINKID_DataType = "Text",
+        INPID_InputControl = "TextEditControl",
+        INPS_DefaultText = LUT_FOLDER_DEFAULT,
+        TEC_Lines = 1,
+        INPS_StatusText = "Scanned when Fusion starts; a new folder is picked up after a restart. Use LUT file without restarting.",
+    })
+    InReload = self:AddInput("Reload LUT", "ReloadLut", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "ButtonControl",
+        INP_DoNotifyChanged = true,
+        INPS_StatusText = "Reads the selected file again after it changed on disk.",
+    })
+    self:EndControlNest()
+end
+
+-- ---------------------------------------------------------------- helpers
+
+local syncing = false
+
+local function resolvePath(sel, file)
+    sel = math.floor((sel or 0) + 0.5)
+    if sel >= 1 and LUT_FILES[sel] then return LUT_FILES[sel].path end
+    if file and file ~= "" then
+        local ok, mapped = pcall(function() return self.Comp:MapPath(file) end)
+        if ok and mapped and mapped ~= "" then return mapped end
+        return file
+    end
+    return nil
+end
+
+-- Fusion does not document how to write a Text input from inside a fuse; try the
+-- known forms in order and verify that the value actually took.
+local fieldMethod = nil
+
+local function setTextField(inp, text, time)
+    if not inp then return end
+    local attempts = {
+        function() inp:SetSource(text, time) end,
+        function() inp:SetSource(Text(text), time) end,
+        function() self:SetInput("LutFile", text) end,
+    }
+    local first = fieldMethod
+    for i, attempt in ipairs(attempts) do
+        if not fieldMethod or fieldMethod == i then
+            local ok = pcall(attempt)
+            if ok then
+                local readOk, current = pcall(function() return inp:GetSource(time).Value end)
+                if readOk and current == text then
+                    fieldMethod = i
+                    return true
+                end
+            end
+        end
+    end
+    if not first then
+        print("PSN_LUT: could not update the LUT file field")
+    end
+    return false
+end
+
+local function timePath(time)
+    local sel = 0
+    local ok1 = pcall(function() sel = InLutSel:GetSource(time).Value end)
+    local file = nil
+    local ok2 = pcall(function() file = InLutFile:GetSource(time).Value end)
+    if not ok1 then sel = 0 end
+    if not ok2 then file = nil end
+    return resolvePath(sel, file)
+end
+
+function NotifyChanged(inp, param, time)
+    if syncing then return end
+    syncing = true
+    if inp == InLutSel then
+        local sel = math.floor(param.Value + 0.5)
+        if sel >= 1 and LUT_FILES[sel] then
+            -- keep the file field showing the LUT that is actually used
+            setTextField(InLutFile, LUT_FILES[sel].path, time)
+        end
+    elseif inp == InLutFile then
+        local value = param.Value
+        if value and value ~= "" then
+            -- ignore the echo from our own field update
+            local sel = math.floor(InLutSel:GetSource(time).Value + 0.5)
+            local selectedPath = (sel >= 1 and LUT_FILES[sel]) and LUT_FILES[sel].path or nil
+            if not selectedPath or value ~= selectedPath then
+                pcall(function() InLutSel:SetSource(Number(0), time) end)
+            end
+            local path = timePath(time)
+            if path then CACHE[path] = nil end
+        end
+    elseif inp == InReload then
+        if param.Value > 0.5 then
+            local path = timePath(time)
+            if path then
+                CACHE[path] = nil
+                loadLUT(path)
+            end
+        end
+    end
+    syncing = false
+end
+
+-- ---------------------------------------------------------------- processing
+
+-- Runs once per thread; only the values in `env` are visible.
+local processPixel = function(x, y, p)
+    local a = p.A
+    if premul and a <= 0 then return p end
+    local f = premul and a or 1
+
+    local vr, vg, vb = p.R / f, p.G / f, p.B / f
+
+    local cr, cg, cb = vr, vg, vb
+    if cr < 0 then cr = 0 elseif cr > 1 then cr = 1 end
+    if cg < 0 then cg = 0 elseif cg > 1 then cg = 1 end
+    if cb < 0 then cb = 0 elseif cb > 1 then cb = 1 end
+
+    local er, eg, eb = cr, cg, cb
+    if transfer then
+        if er <= 0.0031308 then er = er * 12.92 else er = 1.055 * er ^ (1 / 2.4) - 0.055 end
+        if eg <= 0.0031308 then eg = eg * 12.92 else eg = 1.055 * eg ^ (1 / 2.4) - 0.055 end
+        if eb <= 0.0031308 then eb = eb * 12.92 else eb = 1.055 * eb ^ (1 / 2.4) - 0.055 end
+    end
+
+    local er0, eg0, eb0 = er, eg, eb
+
+    -- 1D stage (some .cube files carry one before the cube)
+    if has1d then
+        local x1 = (er - d1r) * k1r
+        local y1 = (eg - d1g) * k1g
+        local z1 = (eb - d1b) * k1b
+        if x1 < 0 then x1 = 0 elseif x1 > m1 then x1 = m1 end
+        if y1 < 0 then y1 = 0 elseif y1 > m1 then y1 = m1 end
+        if z1 < 0 then z1 = 0 elseif z1 > m1 then z1 = m1 end
+        local i1, j1, k1 = math.floor(x1), math.floor(y1), math.floor(z1)
+        if i1 > m1b then i1 = m1b end
+        if j1 > m1b then j1 = m1b end
+        if k1 > m1b then k1 = m1b end
+        local fx1, fy1, fz1 = x1 - i1, y1 - j1, z1 - k1
+        er = r1[i1 + 1] + (r1[i1 + 2] - r1[i1 + 1]) * fx1
+        eg = g1[j1 + 1] + (g1[j1 + 2] - g1[j1 + 1]) * fy1
+        eb = b1[k1 + 1] + (b1[k1 + 2] - b1[k1 + 1]) * fz1
+    end
+
+    -- 3D stage
+    if has3d then
+        local x3 = (er - d3r) * k3r
+        local y3 = (eg - d3g) * k3g
+        local z3 = (eb - d3b) * k3b
+        if x3 < 0 then x3 = 0 elseif x3 > m3 then x3 = m3 end
+        if y3 < 0 then y3 = 0 elseif y3 > m3 then y3 = m3 end
+        if z3 < 0 then z3 = 0 elseif z3 > m3 then z3 = m3 end
+        local i, j, k = math.floor(x3), math.floor(y3), math.floor(z3)
+        if i > m3b then i = m3b end
+        if j > m3b then j = m3b end
+        if k > m3b then k = m3b end
+        local fx, fy, fz = x3 - i, y3 - j, z3 - k
+
+        local o000 = 1 + i + n3 * j + n3n3 * k
+        local or_, og, ob
+
+        if tetra then
+            local w0, w1, w2, w3, c1, c2, c3
+            if fx > fy then
+                if fy > fz then
+                    w0, w1, w2, w3 = 1 - fx, fx - fy, fy - fz, fz
+                    c1, c2, c3 = o000 + 1, o000 + n3 + 1, o000 + n3n3 + n3 + 1
+                elseif fx > fz then
+                    w0, w1, w2, w3 = 1 - fx, fx - fz, fz - fy, fy
+                    c1, c2, c3 = o000 + 1, o000 + n3n3 + 1, o000 + n3n3 + n3 + 1
+                else
+                    w0, w1, w2, w3 = 1 - fz, fz - fx, fx - fy, fy
+                    c1, c2, c3 = o000 + n3n3, o000 + n3n3 + 1, o000 + n3n3 + n3 + 1
+                end
+            else
+                if fz > fy then
+                    w0, w1, w2, w3 = 1 - fz, fz - fy, fy - fx, fx
+                    c1, c2, c3 = o000 + n3n3, o000 + n3n3 + n3, o000 + n3n3 + n3 + 1
+                elseif fz > fx then
+                    w0, w1, w2, w3 = 1 - fy, fy - fz, fz - fx, fx
+                    c1, c2, c3 = o000 + n3, o000 + n3n3 + n3, o000 + n3n3 + n3 + 1
+                else
+                    w0, w1, w2, w3 = 1 - fy, fy - fx, fx - fz, fz
+                    c1, c2, c3 = o000 + n3, o000 + n3 + 1, o000 + n3n3 + n3 + 1
+                end
+            end
+            or_ = w0 * r3[o000] + w1 * r3[c1] + w2 * r3[c2] + w3 * r3[c3]
+            og = w0 * g3[o000] + w1 * g3[c1] + w2 * g3[c2] + w3 * g3[c3]
+            ob = w0 * b3[o000] + w1 * b3[c1] + w2 * b3[c2] + w3 * b3[c3]
+        else
+            local o100, o010, o001 = o000 + 1, o000 + n3, o000 + n3n3
+            local o110, o101 = o000 + n3 + 1, o000 + n3n3 + 1
+            local o011, o111 = o000 + n3n3 + n3, o000 + n3n3 + n3 + 1
+            local ix, iy, iz = 1 - fx, 1 - fy, 1 - fz
+            local w000, w100 = ix * iy * iz, fx * iy * iz
+            local w010, w110 = ix * fy * iz, fx * fy * iz
+            local w001, w101 = ix * iy * fz, fx * iy * fz
+            local w011, w111 = ix * fy * fz, fx * fy * fz
+            or_ = w000 * r3[o000] + w100 * r3[o100] + w010 * r3[o010] + w110 * r3[o110]
+                + w001 * r3[o001] + w101 * r3[o101] + w011 * r3[o011] + w111 * r3[o111]
+            og = w000 * g3[o000] + w100 * g3[o100] + w010 * g3[o010] + w110 * g3[o110]
+                + w001 * g3[o001] + w101 * g3[o101] + w011 * g3[o011] + w111 * g3[o111]
+            ob = w000 * b3[o000] + w100 * b3[o100] + w010 * b3[o010] + w110 * b3[o110]
+                + w001 * b3[o001] + w101 * b3[o101] + w011 * b3[o011] + w111 * b3[o111]
+        end
+        er, eg, eb = or_, og, ob
+    end
+
+    if mix < 1 then
+        er = er0 + (er - er0) * mix
+        eg = eg0 + (eg - eg0) * mix
+        eb = eb0 + (eb - eb0) * mix
+    end
+
+    if transfer then
+        if er <= 0.04045 then er = er / 12.92 else er = ((er + 0.055) / 1.055) ^ 2.4 end
+        if eg <= 0.04045 then eg = eg / 12.92 else eg = ((eg + 0.055) / 1.055) ^ 2.4 end
+        if eb <= 0.04045 then eb = eb / 12.92 else eb = ((eb + 0.055) / 1.055) ^ 2.4 end
+    end
+
+    if preserve then
+        er = er + (vr - cr)
+        eg = eg + (vg - cg)
+        eb = eb + (vb - cb)
+    end
+
+    p.R, p.G, p.B = er * f, eg * f, eb * f
+    return p
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    if not src then OutImage:Set(req, nil) return end
+    if InPreview:GetValue(req).Value < 0.5 then OutImage:Set(req, src) return end
+
+    local path = resolvePath(InLutSel:GetValue(req).Value, InLutFile:GetValue(req).Value)
+    if not path or path == "" then OutImage:Set(req, src) return end
+
+    local lut = loadLUT(path)
+    if lut.error then OutImage:Set(req, src) return end
+
+    local has1d = lut.n1 ~= nil and lut.n1 >= 2
+    local has3d = lut.n3 ~= nil and lut.n3 >= 2
+    if not has1d and not has3d then OutImage:Set(req, src) return end
+
+    local mix = math.max(0, math.min(1, InMix:GetValue(req).Value / 100))
+    if mix <= 0 then OutImage:Set(req, src) return end
+
+    local n1 = lut.n1 or 1
+    local n3 = lut.n3 or 1
+    local env = {
+        has1d = has1d, n1 = n1, m1 = n1 - 1, m1b = math.max(0, n1 - 2),
+        r1 = lut.r1, g1 = lut.g1, b1 = lut.b1,
+        d1r = lut.dmin[1], d1g = lut.dmin[2], d1b = lut.dmin[3],
+        k1r = domainSlope(lut, 1, n1), k1g = domainSlope(lut, 2, n1), k1b = domainSlope(lut, 3, n1),
+        has3d = has3d, n3 = n3, n3n3 = n3 * n3, m3 = n3 - 1, m3b = math.max(0, n3 - 2),
+        r3 = lut.r3, g3 = lut.g3, b3 = lut.b3,
+        d3r = lut.dmin[1], d3g = lut.dmin[2], d3b = lut.dmin[3],
+        k3r = domainSlope(lut, 1, n3), k3g = domainSlope(lut, 2, n3), k3b = domainSlope(lut, 3, n3),
+        transfer = InSpace:GetValue(req).Value > 0.5,
+        tetra = InInterp:GetValue(req).Value < 0.5,
+        premul = InAlpha:GetValue(req).Value > 0.5,
+        preserve = InOverRange:GetValue(req).Value > 0.5,
+        mix = mix,
+    }
+
+    src:DownloadGPUMem(req)
+    local dst = Image({ IMG_Like = src })
+    dst:MultiProcessPixels(nil, env, 0, 0, src.Width, src.Height, src, processPixel)
+    OutImage:Set(req, dst)
+end
