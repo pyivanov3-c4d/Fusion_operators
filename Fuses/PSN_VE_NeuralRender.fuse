@@ -1,0 +1,998 @@
+--[[--
+PSN_VE_NeuralRender 2.0
+Visual Enhancer (VE_CLI.exe) inside Fusion 20.
+
+Frame in -> frame out. Parameters live on the node; results are cached on disk
+per parameter set + frame, so revisiting a frame is instant. Parameters only take
+effect when applied: press "Apply" (or enable "Auto update").
+
+Algorithms (Visual Enhancer commands):
+  Neural Rendering  (render)      DLSS 5 neural rendering, 3 styles
+  AI Upscale        (upscale)     VisionNext / RazorNext / PeakMagnetar / OptiMagnetar / TinyMagnetar
+  RTX Super Res     (upscale)     RTX Video Super Resolution
+  DLSS Super Res    (upscale)     DLAA / Quality / Balanced / Performance / Ultra Performance
+  Ray Reconstruction(reconstruct) DLSS Ray Reconstruction at native 1x
+
+Install:  %APPDATA%\Blackmagic Design\Fusion\Fuses\PSN_VE_NeuralRender.fuse
+Category: PSN\Neural
+--]]--
+
+FuRegisterClass("PSN_VE_NeuralRender", CT_Tool, {
+	REGS_Name = "PSN_VE_NeuralRender",
+	REGS_Category = "PSN\\Neural",
+	REGS_OpIconString = "VENR",
+	REGS_OpDescription = "Visual Enhancer: DLSS 5 neural rendering, AI upscale, RTX VSR, DLSS SR, RR",
+	REGS_HelpTopic = "Tools/PSN/VE_NeuralRender",
+	REG_OpNoMask = true,
+	REG_NoMotionBlurCtrls = true,
+	REG_TimeVariant = true,
+})
+
+-- version / self-update -------------------------------------------------------
+
+local FUSE_VERSION = "2.1"
+
+local function thisDir()
+	local src = debug.getinfo(1, "S").source or ""
+	src = src:gsub("^@", ""):gsub("/", "\\")
+	return (src:match("^(.*)\\[^\\]+$")) or "."
+end
+
+local UPD_DIR = thisDir()
+local UPD = nil
+do
+	local ok, mod = pcall(dofile, UPD_DIR .. "\\PSN_VE_Update.lua")
+	if ok and type(mod) == "table" then UPD = mod end
+end
+
+-- ---------------------------------------------------------------- utilities
+
+local LOGNAME = "psn_ve.log"
+
+local function nowStr()
+	return os.date("%Y-%m-%d %H:%M:%S")
+end
+
+local function logTo(dir, msg)
+	local path = dir .. "\\" .. LOGNAME
+	local f = io.open(path, "a")
+	if f then
+		f:write(nowStr(), "  ", tostring(msg), "\n")
+		f:close()
+	end
+end
+
+local function fileExists(path)
+	local f = io.open(path, "rb")
+	if f then f:close() return true end
+	return false
+end
+
+local function readAll(path)
+	local f = io.open(path, "rb")
+	if not f then return nil end
+	local data = f:read("*a")
+	f:close()
+	return data
+end
+
+local function writeAll(path, data)
+	local f = io.open(path, "wb")
+	if not f then return false end
+	f:write(data)
+	f:close()
+	return true
+end
+
+local function ensureDir(path)
+	os.execute('cmd /c if not exist "' .. path .. '" mkdir "' .. path .. '"')
+end
+
+-- stable djb2 hash over bytes
+local function hash(s)
+	local h = 5381
+	for i = 1, #s do
+		h = (h * 33 + s:byte(i)) % 4294967296
+	end
+	return string.format("%08x", h)
+end
+
+local function toSRGB(c)
+	if c <= 0 then return 0 elseif c >= 1 then return 1 end
+	if c <= 0.0031308 then return c * 12.92 end
+	return 1.055 * (c ^ (1 / 2.4)) - 0.055
+end
+
+local function fromSRGB(c)
+	if c <= 0 then return 0 elseif c >= 1 then return 1 end
+	if c <= 0.04045 then return c / 12.92 end
+	return ((c + 0.055) / 1.055) ^ 2.4
+end
+
+local ffi_ok, ffi = pcall(require, "ffi")
+if not ffi_ok then ffi = nil end
+
+local function safeName(name)
+	return (tostring(name or "tool"):gsub("[^%w_%-]", "_"))
+end
+
+-- ---------------------------------------------------------------- 16-bit TIFF
+
+-- Uncompressed little-endian 16-bit RGB TIFF from an Image.
+local function writeTIFF16(img, path, srgb)
+	local w, h = img.Width, img.Height
+	local dataBytes = w * h * 6
+	local bitsOff = 8 + dataBytes
+	local ifdOff = bitsOff + 6
+	local entries = 10
+	local ifdBytes = 2 + entries * 12 + 4
+	local total = ifdOff + ifdBytes
+
+	local buf = ffi and ffi.new("uint8_t[?]", total) or nil
+	local chunks = nil
+	if not buf then chunks = {} end
+
+	local pos = 0
+	local function put8(v)
+		if buf then buf[pos] = v else chunks[#chunks + 1] = string.char(v) end
+		pos = pos + 1
+	end
+	local function put16(v)
+		put8(v % 256); put8(math.floor(v / 256) % 256)
+	end
+	local function put32(v)
+		put8(v % 256); put8(math.floor(v / 256) % 256)
+		put8(math.floor(v / 65536) % 256); put8(math.floor(v / 16777216) % 256)
+	end
+
+	put8(73); put8(73); put16(42); put32(ifdOff)
+
+	local p = Pixel()
+	for y = 0, h - 1 do
+		for x = 0, w - 1 do
+			img:GetPixel(x, y, p)
+			local r, g, b = p.R, p.G, p.B
+			if srgb then r, g, b = toSRGB(r), toSRGB(g), toSRGB(b) end
+			put16(math.floor(math.max(0, math.min(1, r)) * 65535 + 0.5))
+			put16(math.floor(math.max(0, math.min(1, g)) * 65535 + 0.5))
+			put16(math.floor(math.max(0, math.min(1, b)) * 65535 + 0.5))
+		end
+	end
+
+	local function entry(tag, typ, count, value)
+		put16(tag); put16(typ); put32(count); put32(value)
+	end
+
+	put16(16); put16(16); put16(16)   -- BitsPerSample array at bitsOff
+	put16(entries)
+	entry(256, 4, 1, w)
+	entry(257, 4, 1, h)
+	entry(258, 3, 3, bitsOff)
+	entry(259, 3, 1, 1)
+	entry(262, 3, 1, 2)
+	entry(273, 4, 1, 8)
+	entry(277, 3, 1, 3)
+	entry(278, 4, 1, h)
+	entry(279, 4, 1, dataBytes)
+	entry(284, 3, 1, 1)
+	put32(0)
+
+	local payload
+	if buf then payload = ffi.string(buf, total) else payload = table.concat(chunks) end
+	return writeAll(path, payload)
+end
+
+-- Uncompressed 8/16-bit TIFF (single or multi strip, 3 or 4 samples).
+local function readTIFF16(path, like, srgb)
+	local data = readAll(path)
+	if not data or #data < 8 then return nil, "missing file" end
+	local bo = data:sub(1, 2)
+	local le = (bo == "II")
+	if not le and bo ~= "MM" then return nil, "not a TIFF" end
+
+	local function u16(o)
+		local a, b = data:byte(o + 1), data:byte(o + 2)
+		if not a or not b then return 0 end
+		if le then return a + b * 256 else return a * 256 + b end
+	end
+	local function u32(o)
+		local a, b, c, d = data:byte(o + 1, o + 4)
+		if not a then return 0 end
+		if le then return a + b * 256 + c * 65536 + d * 16777216 end
+		return a * 16777216 + b * 65536 + c * 256 + d
+	end
+
+	local ifd = u32(4)
+	local n = u16(ifd)
+	local tags = {}
+	for i = 0, n - 1 do
+		local e = ifd + 2 + i * 12
+		tags[u16(e)] = { typ = u16(e + 2), count = u32(e + 4), off = e + 8 }
+	end
+
+	local function arr(tag)
+		local t = tags[tag]
+		if not t then return nil end
+		local out = {}
+		if t.count == 1 then
+			out[1] = (t.typ == 3) and u16(t.off) or u32(t.off)
+		else
+			local o = u32(t.off)
+			for i = 0, t.count - 1 do
+				out[i + 1] = (t.typ == 3) and u16(o + i * 2) or u32(o + i * 4)
+			end
+		end
+		return out
+	end
+
+	local w = (arr(256) or {})[1]
+	local h = (arr(257) or {})[1]
+	local spp = (arr(277) or {})[1] or 3
+	local comp = (arr(259) or {})[1] or 1
+	local bitsPer = (arr(258) or {})[1] or 8
+	local rowsPer = (arr(278) or {})[1] or h
+	local offs = arr(273)
+	if not (w and h and offs) then return nil, "unsupported TIFF" end
+	if comp ~= 1 then return nil, "compressed TIFF not supported (" .. comp .. ")" end
+	if bitsPer ~= 8 and bitsPer ~= 16 then return nil, "unsupported bit depth " .. bitsPer end
+
+	local raw = ffi and ffi.cast("const uint8_t*", data) or nil
+	local function getb(o)
+		if raw then return raw[o] end
+		return data:byte(o + 1) or 0
+	end
+
+	local out = Image({ IMG_Like = like, IMG_NoData = false, IMG_Width = w, IMG_Height = h })
+	local p = Pixel()
+	local bytes = bitsPer / 8
+	local rowBytes = w * spp * bytes
+	local scale = (bitsPer == 16) and (1 / 65535) or (1 / 255)
+	local srgbOn = srgb and true or false
+
+	local function get16(o)
+		if le then return getb(o) + getb(o + 1) * 256 end
+		return getb(o) * 256 + getb(o + 1)
+	end
+
+	local y = 0
+	for s = 1, #offs do
+		local base = offs[s]
+		local rows = math.min(rowsPer, h - y)
+		if rows <= 0 then break end
+		for r = 0, rows - 1 do
+			local row = base + r * rowBytes
+			for x = 0, w - 1 do
+				local o = row + x * spp * bytes
+				local rv, gv, bv
+				if bitsPer == 16 then
+					rv = get16(o) * scale
+					gv = get16(o + 2) * scale
+					bv = get16(o + 4) * scale
+				else
+					rv = getb(o) * scale
+					gv = getb(o + 1) * scale
+					bv = getb(o + 2) * scale
+				end
+				if srgbOn then
+					p.R, p.G, p.B = fromSRGB(rv), fromSRGB(gv), fromSRGB(bv)
+				else
+					p.R, p.G, p.B = rv, gv, bv
+				end
+				p.A = 1
+				out:SetPixel(x, y, p)
+			end
+			y = y + 1
+		end
+	end
+
+	return out
+end
+
+local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\luts]]
+local LUT_FILES = {}
+do
+	local p = io.popen('cmd /c dir /b /s "' .. LUT_FOLDER_DEFAULT .. '\\*.cube" 2>nul')
+	if p then
+		local prefix = (LUT_FOLDER_DEFAULT .. "\\"):upper()
+		for line in p:lines() do
+			line = line:gsub("%s+$", "")
+			if line ~= "" then
+				local rel = line
+				local up = line:upper()
+				if up:sub(1, #prefix) == prefix then rel = line:sub(#prefix + 1) end
+				LUT_FILES[#LUT_FILES + 1] = rel
+			end
+		end
+		p:close()
+	end
+end
+
+-- ---------------------------------------------------------------- preset (NR)
+
+local function jsonEscape(s)
+	return (tostring(s):gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'))
+end
+
+local function buildPreset(req)
+	local styles = { "Style 0", "Style 1", "Style 2" }
+	local style = styles[math.max(1, math.min(3, math.floor(InStyle:GetValue(req).Value + 0.5) + 1))]
+
+	local sharpen = InSharpen:GetValue(req).Value > 0.5
+	local grain = InGrain:GetValue(req).Value > 0.5
+	local reshade = InReShade:GetValue(req).Value > 0.5
+	local colour = InColour:GetValue(req).Value > 0.5
+
+	local bitDepth = (InBitDepth:GetValue(req).Value > 0.5) and 16 or 8
+	local method = (InSharpenMethod:GetValue(req).Value > 0.5) and "NVIDIA NIS" or "AMD CAS"
+	local depthMode = (InReShadeDepth:GetValue(req).Value > 0.5) and "Auto" or "None"
+
+	local stages = { "neural_model" }
+	if sharpen then stages[#stages + 1] = "cas_sharpening" end
+	if grain then stages[#stages + 1] = "grain" end
+	if reshade then stages[#stages + 1] = "reshade" end
+	if colour then stages[#stages + 1] = "coloring" end
+
+	local en = {}
+	for i = 1, #stages do en[i] = '"' .. stages[i] .. '"' end
+
+	local s = {}
+	local function add(k, v) s[#s + 1] = string.format('"%s": %s', k, v) end
+
+	add("image_stage_order",
+		'["neural_model","scale_method","dlss_super_resolution","dlss_ray_reconstruction","super_resolution","reshade","coloring","cas_sharpening","grain"]')
+	add("image_enabled_stages", "[" .. table.concat(en, ",") .. "]")
+
+	add("nr_style", '"' .. jsonEscape(style) .. '"')
+	add("nr_intensity", string.format("%.4f", InIntensity:GetValue(req).Value))
+	add("nr_passes", string.format("%d", math.floor(InPasses:GetValue(req).Value + 0.5)))
+	add("local_tone_strength", string.format("%.4f", InTone:GetValue(req).Value))
+	add("local_structure_strength", string.format("%.4f", InStructure:GetValue(req).Value))
+	add("skin_structure_strength", string.format("%.4f", InSkin:GetValue(req).Value))
+	add("automatic_mask", InAutoMask:GetValue(req).Value > 0.5 and "true" or "false")
+
+	add("image_format", '"TIFF"')
+	add("image_bit_depth", string.format("%d", bitDepth))
+
+	if sharpen then
+		add("sharpening_method", '"' .. method .. '"')
+		add("cas_sharpness", string.format("%d", math.floor(InSharpenAmount:GetValue(req).Value + 0.5)))
+	end
+	if grain then
+		add("grain_amount", string.format("%d", math.floor(InGrainAmount:GetValue(req).Value + 0.5)))
+		add("grain_size", string.format("%.2f", InGrainSize:GetValue(req).Value))
+		add("grain_response", string.format("%d", math.floor(InGrainResponse:GetValue(req).Value + 0.5)))
+	end
+	if reshade then
+		local rp = InReShadePreset:GetValue(req).Value or ""
+		if rp ~= "" then add("reshade_image_preset_path", '"' .. jsonEscape(rp) .. '"') end
+		add("reshade_image_mix", string.format("%d", math.floor(InReShadeMix:GetValue(req).Value + 0.5)))
+		add("reshade_image_depth_mode", '"' .. depthMode .. '"')
+		add("reshade_preset_path", '"' .. jsonEscape(InReShadePreset:GetValue(req).Value or "") .. '"')
+		add("reshade_mix", string.format("%d", math.floor(InReShadeMix:GetValue(req).Value + 0.5)))
+		add("reshade_depth_mode", '"' .. depthMode .. '"')
+	end
+	if colour then
+		local sel = math.floor(InLutSel:GetValue(req).Value + 0.5)
+		local lut = InLutPath:GetValue(req).Value or ""
+		if sel >= 1 and LUT_FILES[sel] then
+			lut = (InLutFolder:GetValue(req).Value or LUT_FOLDER_DEFAULT) .. "\\" .. LUT_FILES[sel]
+		end
+		if lut ~= "" then add("lut_path", '"' .. jsonEscape(lut) .. '"') end
+		add("lut_mix", string.format("%d", math.floor(InLutMix:GetValue(req).Value + 0.5)))
+		add("lut_exposure", string.format("%.3f", InLutExposure:GetValue(req).Value))
+		add("lut_contrast", string.format("%d", math.floor(InLutContrast:GetValue(req).Value + 0.5)))
+		add("lut_saturation", string.format("%d", math.floor(InLutSaturation:GetValue(req).Value + 0.5)))
+		add("lut_temperature", string.format("%d", math.floor(InLutTemperature:GetValue(req).Value + 0.5)))
+	end
+
+	add("upscale_image_vsr_quality", string.format("%d", math.floor(InVsrQuality:GetValue(req).Value + 0.5) + 1))
+	add("hdr_mode", "false")
+
+	return '{\n  "format": "dlss5-visual-enhancer-settings-preset",\n'
+		.. '  "schema_version": 41,\n  "name": "PSN VE Neural Render",\n'
+		.. '  "settings": {\n    ' .. table.concat(s, ",\n    ") .. "\n  }\n}\n"
+end
+
+-- ---------------------------------------------------------------- UI
+
+local ALGOS = { "Neural Rendering (DLSS 5)", "AI Upscale (model)", "RTX Super Resolution",
+	"DLSS Super Resolution", "Ray Reconstruction" }
+local MODELS = { "visionnext", "razornext", "peakmagnetar", "optimagnetar", "tinymagnetar" }
+local SCALES = { 1, 2, 4, 6, 8 }
+local DLSS_MODES = { "dlaa", "quality", "balanced", "performance", "ultra-performance" }
+local STYLES = { "Style 0", "Style 1", "Style 2" }
+
+function Create()
+	InImage = self:AddInput("Input", "Input", {
+		LINKID_DataType = "Image",
+		LINK_Main = 1,
+	})
+	OutImage = self:AddOutput("Output", "Output", {
+		LINKID_DataType = "Image",
+		LINK_Main = 1,
+	})
+
+	-- ---------------------------------------------------------------- Neural
+	self:BeginControlNest("Neural Rendering", "NeuralNest", true, {})
+	InStyle = self:AddInput("Style", "Style", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 2,
+		INP_Integer = true,
+		{ CCS_AddString = "Style 0" },
+		{ CCS_AddString = "Style 1" },
+		{ CCS_AddString = "Style 2" },
+		ICS_ControlPage = "Neural",
+	})
+	InIntensity = self:AddInput("Intensity", "Intensity", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 2, INP_MinAllowed = 0, INP_MaxAllowed = 2,
+		INP_Default = 1.654,
+		ICS_ControlPage = "Neural",
+	})
+	InPasses = self:AddInput("Passes", "Passes", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 1, INP_MaxScale = 4, INP_MinAllowed = 1, INP_MaxAllowed = 8,
+		INP_Default = 1, INP_Integer = true,
+		ICS_ControlPage = "Neural",
+	})
+	InTone = self:AddInput("Local tone", "LocalTone", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 1, INP_Default = 0.157,
+		ICS_ControlPage = "Neural",
+	})
+	InStructure = self:AddInput("Local structure", "LocalStructure", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 1, INP_Default = 1.0,
+		ICS_ControlPage = "Neural",
+	})
+	InSkin = self:AddInput("Skin structure", "SkinStructure", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 1, INP_Default = 0.0,
+		ICS_ControlPage = "Neural",
+	})
+	InAutoMask = self:AddInput("Automatic mask", "AutoMask", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 1,
+		ICS_ControlPage = "Neural",
+	})
+	self:EndControlNest()
+
+	-- ---------------------------------------------------------------- Post
+	self:BeginControlNest("Post", "PostNest", false, {})
+	InSharpen = self:AddInput("Sharpening (CAS)", "Sharpen", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0,
+		ICS_ControlPage = "Post",
+	})
+	InSharpenAmount = self:AddInput("Sharpness", "SharpenAmount", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 100, INP_Default = 21, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InGrain = self:AddInput("Grain", "Grain", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0,
+		ICS_ControlPage = "Post",
+	})
+	InGrainAmount = self:AddInput("Grain amount", "GrainAmount", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 100, INP_Default = 0, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InSharpenMethod = self:AddInput("Sharpening method", "SharpenMethod", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		{ CCS_AddString = "AMD CAS" },
+		{ CCS_AddString = "NVIDIA NIS" },
+		ICS_ControlPage = "Post",
+	})
+	InGrainSize = self:AddInput("Grain size", "GrainSize", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0.5, INP_MaxScale = 4, INP_Default = 1,
+		ICS_ControlPage = "Post",
+	})
+	InGrainResponse = self:AddInput("Grain response", "GrainResponse", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 100, INP_Default = 70, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InReShade = self:AddInput("ReShade stage", "ReShade", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0,
+		ICS_ControlPage = "Post",
+	})
+	InReShadePreset = self:AddInput("ReShade .ini", "ReShadePreset", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = "",
+		TEC_Lines = 1,
+		ICS_ControlPage = "Post",
+	})
+	InReShadeMix = self:AddInput("ReShade mix", "ReShadeMix", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 100, INP_Default = 100, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InReShadeDepth = self:AddInput("ReShade depth", "ReShadeDepth", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		{ CCS_AddString = "None" },
+		{ CCS_AddString = "Auto (MoGe-2)" },
+		ICS_ControlPage = "Post",
+	})
+	InColour = self:AddInput("Colour / LUT stage", "Colour", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0,
+		ICS_ControlPage = "Post",
+	})
+	local lutOpts = {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		ICS_ControlPage = "Post",
+	}
+	lutOpts[#lutOpts + 1] = { CCS_AddString = "(path below)" }
+	for i = 1, #LUT_FILES do
+		lutOpts[#lutOpts + 1] = { CCS_AddString = LUT_FILES[i] }
+	end
+	InLutSel = self:AddInput("LUT", "LutSel", lutOpts)
+	InLutPath = self:AddInput("LUT .cube", "LutPath", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = "",
+		TEC_Lines = 1,
+		ICS_ControlPage = "Post",
+	})
+	InLutMix = self:AddInput("LUT mix", "LutMix", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = 0, INP_MaxScale = 100, INP_Default = 100, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InLutExposure = self:AddInput("Exposure", "LutExposure", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = -5, INP_MaxScale = 5, INP_MinAllowed = -10, INP_MaxAllowed = 10,
+		INP_Default = 0,
+		ICS_ControlPage = "Post",
+	})
+	InLutContrast = self:AddInput("Contrast", "LutContrast", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = -100, INP_MaxScale = 100, INP_Default = 0, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InLutSaturation = self:AddInput("Saturation", "LutSaturation", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = -100, INP_MaxScale = 100, INP_Default = 0, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	InLutTemperature = self:AddInput("Temperature", "LutTemperature", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_MinScale = -100, INP_MaxScale = 100, INP_Default = 0, INP_Integer = true,
+		ICS_ControlPage = "Post",
+	})
+	self:EndControlNest()
+
+	-- ---------------------------------------------------------------- Algorithm
+	self:BeginControlNest("Algorithm", "AlgoNest", true, {})
+	InAlgo = self:AddInput("Algorithm", "Algo", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		{ CCS_AddString = ALGOS[1] },
+		{ CCS_AddString = ALGOS[2] },
+		{ CCS_AddString = ALGOS[3] },
+		{ CCS_AddString = ALGOS[4] },
+		{ CCS_AddString = ALGOS[5] },
+		ICS_ControlPage = "Algorithm",
+	})
+	InModel = self:AddInput("AI upscale model", "Model", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 3,
+		INP_Integer = true,
+		{ CCS_AddString = "VisionNext" },
+		{ CCS_AddString = "RazorNext" },
+		{ CCS_AddString = "PeakMagnetar" },
+		{ CCS_AddString = "OptiMagnetar" },
+		{ CCS_AddString = "TinyMagnetar" },
+		ICS_ControlPage = "Algorithm",
+	})
+	InScale = self:AddInput("Scale", "Scale", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		{ CCS_AddString = "1x" },
+		{ CCS_AddString = "2x" },
+		{ CCS_AddString = "4x" },
+		{ CCS_AddString = "6x" },
+		{ CCS_AddString = "8x" },
+		ICS_ControlPage = "Algorithm",
+	})
+	InDLSSMode = self:AddInput("DLSS SR mode", "DLSSMode", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 3,
+		INP_Integer = true,
+		{ CCS_AddString = "DLAA" },
+		{ CCS_AddString = "Quality" },
+		{ CCS_AddString = "Balanced" },
+		{ CCS_AddString = "Performance" },
+		{ CCS_AddString = "Ultra Performance" },
+		ICS_ControlPage = "Algorithm",
+	})
+	InVsrQuality = self:AddInput("RTX VSR quality", "VsrQuality", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 3,
+		INP_Integer = true,
+		{ CCS_AddString = "1 (highest)" },
+		{ CCS_AddString = "2" },
+		{ CCS_AddString = "3" },
+		{ CCS_AddString = "4 (fastest)" },
+		ICS_ControlPage = "Algorithm",
+	})
+	self:EndControlNest()
+
+	-- ---------------------------------------------------------------- Engine
+	self:BeginControlNest("Engine", "EngineNest", true, {})
+	InEngine = self:AddInput("VE_CLI.exe", "EnginePath", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = [[C:\__Work\_DeepSeek\Design\dlss5-ve-release\app\VE_CLI.exe]],
+		TEC_Lines = 1,
+		ICS_ControlPage = "Engine",
+	})
+	InGPU = self:AddInput("GPU", "GPU", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = "auto",
+		TEC_Lines = 1,
+		ICS_ControlPage = "Engine",
+	})
+	self:EndControlNest()
+
+	-- ---------------------------------------------------------------- Update
+	self:BeginControlNest("Update", "UpdateNest", true, {})
+	InUpdateSource = self:AddInput("Update source", "UpdateSource", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = [[C:\__Work\_DeepSeek\Fusion\PSN_VE_NeuralRender]],
+		TEC_Lines = 1,
+		ICS_ControlPage = "Settings",
+	})
+	InCheckUpdate = self:AddInput("Check for updates", "CheckUpdate", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ButtonControl",
+		INP_DoNotifyChanged = true,
+		ICS_ControlPage = "Settings",
+	})
+	self:EndControlNest()
+
+	-- ---------------------------------------------------------------- Cache
+	self:BeginControlNest("Cache", "CacheNest", false, {})
+	InBakeDir = self:AddInput("Baked result folder", "BakeDir", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = "",
+		TEC_Lines = 1,
+		ICS_ControlPage = "Settings",
+	})
+	InCollect = self:AddInput("Collect input frames", "Collect", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0,
+		ICS_ControlPage = "Settings",
+	})
+	self:EndControlNest()
+
+	-- ---------------------------------------------------------------- Setting
+	self:BeginControlNest("Setting", "SettingNest", true, {})
+	InSRGB = self:AddInput("sRGB transfer", "SRGB", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 1,
+		ICS_ControlPage = "Settings",
+	})
+	InCacheDir = self:AddInput("Cache folder", "CacheDir", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = [[C:\__Work\_DeepSeek\Fusion\renders\ve_cache]],
+		TEC_Lines = 1,
+		ICS_ControlPage = "Settings",
+	})
+	InLutFolder = self:AddInput("LUT folder", "LutFolder", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		INPS_DefaultText = LUT_FOLDER_DEFAULT,
+		TEC_Lines = 1,
+		ICS_ControlPage = "Settings",
+	})
+	InBake = self:AddInput("Background bake", "AutoBake", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 1,
+		ICS_ControlPage = "Settings",
+	})
+	InRefresh = self:AddInput("Refresh trigger", "Refresh", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0,
+		IC_Visible = false,
+		ICS_ControlPage = "Settings",
+	})
+	InBitDepth = self:AddInput("Output bit depth", "BitDepth", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 1,
+		INP_Integer = true,
+		{ CCS_AddString = "8-bit" },
+		{ CCS_AddString = "16-bit" },
+		ICS_ControlPage = "Settings",
+	})
+	self:EndControlNest()
+end
+
+-- ---------------------------------------------------------------- state files
+
+local function nodeKey(self)
+	local name
+	local ok1 = pcall(function() name = self.Name end)
+	if not ok1 or not name then
+		local ok2, attrs = pcall(function() return self:GetAttrs() end)
+		if ok2 and attrs then name = attrs.TOOLS_Name end
+	end
+	return safeName(name)
+end
+
+local ADDED = false
+local READY = false
+
+function OnAddToFlow()
+	ADDED = true
+end
+
+function NotifyChanged(inp, param, time)
+	local sInp = tostring(inp)
+	local isCheck = (sInp == tostring(InCheckUpdate))
+
+	if isCheck then
+		if not READY then return end
+		pcall(function()
+			if not UPD then return end
+			local src = InUpdateSource:GetValue(0).Value
+			UPD.install(src, UPD_DIR, false)
+		end)
+		return
+	end
+end
+
+-- ---------------------------------------------------------------- process
+
+local function signature(self, req, w, h)
+	local parts = {
+		w, h,
+		math.floor(InAlgo:GetValue(req).Value + 0.5),
+		math.floor(InModel:GetValue(req).Value + 0.5),
+		math.floor(InScale:GetValue(req).Value + 0.5),
+		math.floor(InDLSSMode:GetValue(req).Value + 0.5),
+		math.floor(InStyle:GetValue(req).Value + 0.5),
+		InIntensity:GetValue(req).Value,
+		InPasses:GetValue(req).Value,
+		InTone:GetValue(req).Value,
+		InStructure:GetValue(req).Value,
+		InSkin:GetValue(req).Value,
+		InAutoMask:GetValue(req).Value,
+		InSharpen:GetValue(req).Value,
+		InSharpenAmount:GetValue(req).Value,
+		InGrain:GetValue(req).Value,
+		InGrainAmount:GetValue(req).Value,
+		InSharpenMethod:GetValue(req).Value,
+		InGrainSize:GetValue(req).Value,
+		InGrainResponse:GetValue(req).Value,
+		InReShade:GetValue(req).Value,
+		InReShadePreset:GetValue(req).Value,
+		InReShadeMix:GetValue(req).Value,
+		InReShadeDepth:GetValue(req).Value,
+		InColour:GetValue(req).Value,
+		InLutPath:GetValue(req).Value,
+		InLutSel:GetValue(req).Value,
+		InLutFolder:GetValue(req).Value,
+		InLutMix:GetValue(req).Value,
+		InLutExposure:GetValue(req).Value,
+		InLutContrast:GetValue(req).Value,
+		InLutSaturation:GetValue(req).Value,
+		InLutTemperature:GetValue(req).Value,
+		InVsrQuality:GetValue(req).Value,
+		InBitDepth:GetValue(req).Value,
+		InSRGB:GetValue(req).Value,
+		InEngine:GetValue(req).Value,
+	}
+	local s = {}
+	for i = 1, #parts do s[i] = tostring(parts[i]) end
+	return hash(table.concat(s, "|"))
+end
+
+local function buildCommand(engine, algo, model, scale, dlssMode, gpu, presetPath, inTif, outTif, bitDepth)
+	local cmd
+	if algo == 0 then
+		cmd = string.format('"%s" render "%s" --preset "%s" -o "%s" --json --quiet',
+			engine, inTif, presetPath, outTif)
+	elseif algo == 1 or algo == 2 then
+		local eng = (algo == 1) and model or "rtx"
+		cmd = string.format('"%s" upscale "%s" --engine %s --scale %d --preset "%s" --format tiff --bit-depth %d -o "%s" --json --quiet',
+			engine, inTif, eng, scale, presetPath, bitDepth, outTif)
+	elseif algo == 3 then
+		cmd = string.format('"%s" upscale "%s" --engine dlss --mode %s --preset "%s" --format tiff --bit-depth %d -o "%s" --json --quiet',
+			engine, inTif, dlssMode, presetPath, bitDepth, outTif)
+	else
+		cmd = string.format('"%s" reconstruct "%s" --preset "%s" --format tiff --bit-depth %d -o "%s" --json --quiet',
+			engine, inTif, presetPath, bitDepth, outTif)
+	end
+	if gpu and gpu ~= "" and gpu ~= "auto" then
+		cmd = cmd:gsub(" --json", ' --gpu "' .. gpu .. '" --json', 1)
+	end
+	return cmd
+end
+
+function Process(req)
+	local src = InImage:GetValue(req)
+	if not src then OutImage:Set(req, nil) return end
+
+	local ok, err = pcall(function()
+		local engine = InEngine:GetValue(req).Value
+		local cacheDir = InCacheDir:GetValue(req).Value
+		if not engine or engine == "" or not cacheDir or cacheDir == "" then
+			OutImage:Set(req, src)
+			return
+		end
+		ensureDir(cacheDir)
+
+		local srgbOn = InSRGB:GetValue(req).Value > 0.5
+		local frameName = string.format("f%04d.tif", math.floor((req.Time or 1) + 0.5))
+		local key = nodeKey(self)
+
+		-- collect pass for the bake script
+		if InCollect:GetValue(req).Value > 0.5 then
+			local inDir = cacheDir .. "\\bake\\in"
+			ensureDir(inDir)
+			writeTIFF16(src, inDir .. "\\" .. frameName, srgbOn)
+			OutImage:Set(req, src)
+			return
+		end
+
+		-- baked result for this frame
+		local bakeDir = InBakeDir:GetValue(req).Value
+		if bakeDir and bakeDir ~= "" then
+			local baked = bakeDir .. "\\" .. frameName
+			if not fileExists(baked) then
+				local alt = bakeDir .. "\\" .. (string.gsub(frameName, "%.tif$", ".tiff"))
+				if fileExists(alt) then baked = alt end
+			end
+			if fileExists(baked) then
+				local bimg = readTIFF16(baked, src, srgbOn)
+				if bimg then OutImage:Set(req, bimg) return end
+			end
+		end
+
+		local w, h = src.Width, src.Height
+		local sig = signature(self, req, w, h)
+
+		local outDir = cacheDir .. "\\" .. sig
+		local outPath = outDir .. "\\" .. frameName
+		local outAlt = outDir .. "\\" .. (string.gsub(frameName, "%.tif$", ".tiff"))
+
+		for _, candidate in ipairs({ outPath, outAlt }) do
+			if fileExists(candidate) then
+				local img = readTIFF16(candidate, src, srgbOn)
+				if img then OutImage:Set(req, img) return end
+			end
+		end
+
+		if InBake:GetValue(req).Value > 0.5 then
+			-- background bake: queue the frame, return the source, let the worker batch it
+			ensureDir(outDir)
+			ensureDir(outDir .. "\\in")
+			local presetPath = cacheDir .. "\\preset_" .. sig .. ".json"
+			writeAll(presetPath, buildPreset(req))
+
+			local inFrame = outDir .. "\\in\\" .. frameName
+			if not fileExists(inFrame) then
+				local tmpFrame = inFrame .. ".tmp"
+				writeTIFF16(src, tmpFrame, srgbOn)
+				os.remove(inFrame)
+				os.rename(tmpFrame, inFrame)
+			end
+
+			local lock = outDir .. "\\worker.lock"
+			local running = false
+			if fileExists(lock) then
+				local stamp = tonumber((readAll(lock) or ""):match("%d+") or "")
+				if stamp and (os.time() - stamp) < 120 then running = true end
+			end
+			if not running then
+				writeAll(lock, tostring(os.time()))
+				os.execute(string.format(
+					'cmd /c start "" /b powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s" -SigDir "%s" -Engine "%s" -Preset "%s" -Node "%s" -Refresh "%s"',
+					UPD_DIR .. "\\PSN_VE_AutoBake.ps1", outDir, engine, presetPath, key, UPD_DIR .. "\\PSN_VE_Refresh.lua"))
+			end
+
+			OutImage:Set(req, src)
+			return
+		end
+
+		-- ---- engine run
+		ensureDir(outDir)
+		local inTif = cacheDir .. "\\in_" .. sig .. ".tif"
+		if not fileExists(inTif) then
+			writeTIFF16(src, inTif, srgbOn)
+		end
+
+		local algo = math.floor(InAlgo:GetValue(req).Value + 0.5)
+		local model = MODELS[math.max(1, math.min(#MODELS, math.floor(InModel:GetValue(req).Value + 0.5) + 1))]
+		local scale = SCALES[math.max(1, math.min(#SCALES, math.floor(InScale:GetValue(req).Value + 0.5) + 1))]
+		local dlssMode = DLSS_MODES[math.max(1, math.min(#DLSS_MODES, math.floor(InDLSSMode:GetValue(req).Value + 0.5) + 1))]
+
+		local style = STYLES[math.max(1, math.min(3, math.floor(InStyle:GetValue(req).Value + 0.5) + 1))]
+
+		local presetPath = cacheDir .. "\\preset_" .. sig .. ".json"
+		writeAll(presetPath, buildPreset(req))
+
+		local gpu = InGPU:GetValue(req).Value
+		local bitDepth = (InBitDepth:GetValue(req).Value > 0.5) and 16 or 8
+		local cmd = buildCommand(engine, algo, model, scale, dlssMode, gpu, presetPath, inTif, outPath, bitDepth)
+
+		local batPath = cacheDir .. "\\run_" .. sig .. ".cmd"
+		writeAll(batPath, "@echo off\r\n" .. cmd .. " 2>&1\r\n")
+
+		local t0 = os.clock()
+		local handle = io.popen('cmd /c "' .. batPath .. '"')
+		local result = handle and handle:read("*a") or ""
+		if handle then handle:close() end
+		logTo(cacheDir, string.format("run %s/%.1fs : %s", sig, os.clock() - t0,
+			(result:gsub("%s+", " "):sub(1, 300))))
+
+		local img, msg = readTIFF16(outPath, src, srgbOn)
+		if img then
+			os.remove(inTif)
+			OutImage:Set(req, img)
+			READY = true
+		else
+			logTo(cacheDir, "output unreadable: " .. tostring(msg))
+			OutImage:Set(req, src)
+		end
+	end)
+
+	if not ok then
+		local fb = (os.getenv("TEMP") or ".") .. "\\psn_ve_error.log"
+		local f = io.open(fb, "a")
+		if f then f:write(nowStr(), "  ", tostring(err), "\n"); f:close() end
+		OutImage:Set(req, src)
+	end
+end
