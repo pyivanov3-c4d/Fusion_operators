@@ -5,9 +5,14 @@ LUT packs bundled for the Neural Render operator listed by category in one dropd
 
 ## Controls
 
-- **LUT** — every `.cube` found in the LUT folder when Fusion started, shown as
-  `category/name` (`film/bw/...`, `film/print/...`, `slay-...`). The first entry,
-  **(file below)**, means "use the file field".
+- **Category** — the LUT folder's subfolders become categories: **All LUTs**, **Slay**, **B&W**,
+  **Slide**, **X-Trans**, **Instant**, **Instant Pro**, **Neg Colour**, **Neg New**, **Neg Old**,
+  **Print**, plus **User** when the user LUTs folder has files. The LUT menu below shows only the
+  chosen category, so picking is a short list instead of 300 entries. Switching category applies
+  that category's first LUT.
+- **LUT** — the LUTs of the chosen category, or the full flat list (`film/bw/...`,
+  `film/print/...`, `slay-...`) under **All LUTs**. The first entry, **(file below)**, means "use
+  the file field".
 - **LUT file** — always shows the LUT that is in use. Type or browse for a `.cube` anywhere on
   disk; the menu switches to **(file below)**. Choosing a menu entry writes that entry's path
   here.
@@ -34,11 +39,21 @@ Default: **slay-04-film** (33³ film look), Mix 100, tetrahedral.
 
 ## LUT library
 
-| Folder | Files | Source |
+| Folder | Files | Category |
 | --- | --- | --- |
-| `slay-*.cube` | 5 | [slaycamera/luts](https://github.com/slaycamera/luts), CC BY 4.0 |
-| `film/` | 296 | [YahiaAngelo/Film-Luts](https://github.com/YahiaAngelo/Film-Luts), G'MIC film emulations |
+| `slay-*.cube` | 5 | Slay |
+| `film/bw/` | 25 | B&W |
+| `film/colorslide/` | 26 | Slide |
+| `film/fujixtransiii/` | 15 | X-Trans |
+| `film/instant_consumer/` | 54 | Instant |
+| `film/instant_pro/` | 68 | Instant Pro |
+| `film/negative_color/` | 13 | Neg Colour |
+| `film/negative_new/` | 39 | Neg New |
+| `film/negative_old/` | 44 | Neg Old |
+| `film/print/` | 12 | Print |
 
+Sources: [slaycamera/luts](https://github.com/slaycamera/luts) (CC BY 4.0) and
+[Yahia Angelo's film LUTs](https://github.com/YahiaAngelo/Film-Luts) (G'MIC emulations).
 See `luts/ATTRIBUTION.txt` for the licences. Both packs are display-referred, so the
 default encoding applies them to the values Fusion supplies.
 
@@ -82,6 +97,10 @@ The residual half-level is the 8-bit write (the reference rounds, Fusion truncat
 
 Behaviour checks, all passing with a clean console:
 
+- category menu: **Slay** applies slay-01-amber, **B&W** entry 5 applies ilford_delta_100, and typing
+  a path in **LUT file** returns the menu to (file below); all four category renders are within
+  1/255 of the reference;
+- a saved composition reopens with its category and pick (identical render, 0/255);
 - premultiplied vs straight alpha — the LUT reads unpremultiplied colour and alpha survives;
 - HDR over-range kept (32,38,44) against clipped (6,12,19) in a float32 chain;
 - 1D `.cube` (256-entry invert) exact;

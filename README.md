@@ -74,8 +74,9 @@ See the [usage guide and validation details](docs/PSN_BrightnessContrast.md).
 ## PSN_LUT
 
 Photoshop-style **Color Lookup**: applies a `.cube` LUT to the image. The free LUT packs used by
-PSN_VE_NeuralRender — 5 **slay** looks and 296 **film** emulations — are listed by category in one
-dropdown, and any other `.cube` can be loaded from the file field.
+PSN_VE_NeuralRender — 5 **slay** looks and 296 **film** emulations — are browsed with a
+**Category** menu built from the folder layout (Slay, B&W, Slide, X-Trans, Instant, Instant Pro,
+Neg Colour, Neg New, Neg Old, Print), and any other `.cube` can be loaded from the file field.
 
 - **Mix 0–100** (default 100), **Preview**, tetrahedral or trilinear interpolation.
 - **Display-referred** by default (matches Photoshop on 8-bit sRGB); a **Linear** option puts the

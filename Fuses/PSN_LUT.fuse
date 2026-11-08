@@ -20,18 +20,51 @@ FuRegisterClass("PSN_LUT", CT_Tool, {
 -- ---------------------------------------------------------------- LUT library
 
 -- The list is scanned once when Fusion starts: the workspace packs first, then
--- the user's own Fusion LUTs folder.
+-- the user's own Fusion LUTs folder. Subfolders become the Category menu.
 local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\luts]]
 local LUT_USER_FOLDER = ((os.getenv("APPDATA") or "") .. "\\Blackmagic Design\\Fusion\\LUTs")
 
-local LUT_FILES = {}
+-- Category order and labels. Keys come from the folder layout: film\<key>\ for
+-- the film pack, slay for the top-level slay files, user for the user's folder.
+local CAT_ORDER = { "slay", "bw", "colorslide", "fujixtransiii", "instant_consumer",
+    "instant_pro", "negative_color", "negative_new", "negative_old", "print", "user" }
+local CAT_LABEL = {
+    slay = "Slay", bw = "B&W", colorslide = "Slide", fujixtransiii = "X-Trans",
+    instant_consumer = "Instant", instant_pro = "Instant Pro",
+    negative_color = "Neg Colour", negative_new = "Neg New", negative_old = "Neg Old",
+    print = "Print", user = "User", root = "Top level",
+}
+
+local function categoryOf(rel)
+    local dir = rel:match("^(.*)/[^/]+$")
+    if not dir then
+        return rel:lower():sub(1, 5) == "slay-" and "slay" or "root"
+    end
+    if dir == "user" or dir:sub(1, 5) == "user/" then return "user" end
+    local film = dir:match("^film/(.+)$")
+    if film then return film end
+    return dir
+end
+
+local LUT_FILES = {}     -- every file, sorted by category/name
+local LUT_BUCKETS = {}   -- category key -> files of that category
+local CAT_KEYS = {}
+
+local function addLut(rel, path)
+    local entry = {
+        label = rel,                   -- category/name
+        short = rel:match("([^/]+)$"), -- name only
+        path = path,
+        key = categoryOf(rel),
+    }
+    LUT_FILES[#LUT_FILES + 1] = entry
+end
 
 local function scanFolder(root, prefix)
     if not root or root == "" then return end
     local p = io.popen('cmd /c dir /b /s "' .. root .. '\\*.cube" 2>nul')
     if not p then return end
     local base = (root .. "\\"):upper()
-    local found = {}
     for line in p:lines() do
         line = line:gsub("%s+$", "")
         if line ~= "" then
@@ -39,28 +72,63 @@ local function scanFolder(root, prefix)
             local up = line:upper()
             if up:sub(1, #base) == base then rel = line:sub(#base + 1) end
             rel = rel:gsub("\\", "/"):gsub("%.[^/]+$", "")
-            found[#found + 1] = {
-                label = (prefix and (prefix .. "/") or "") .. rel,
-                path = line,
-            }
+            addLut((prefix and (prefix .. "/") or "") .. rel, line)
         end
     end
     p:close()
-    table.sort(found, function(a, b) return a.label:lower() < b.label:lower() end)
-    for _, entry in ipairs(found) do LUT_FILES[#LUT_FILES + 1] = entry end
 end
 
 scanFolder(LUT_FOLDER_DEFAULT, nil)
 scanFolder(LUT_USER_FOLDER, "user")
 
+table.sort(LUT_FILES, function(a, b) return a.label:lower() < b.label:lower() end)
+for _, entry in ipairs(LUT_FILES) do
+    local bucket = LUT_BUCKETS[entry.key]
+    if not bucket then
+        bucket = {}
+        LUT_BUCKETS[entry.key] = bucket
+        CAT_KEYS[#CAT_KEYS + 1] = entry.key
+    end
+    bucket[#bucket + 1] = entry
+end
+
+local function catRank(key)
+    for i, known in ipairs(CAT_ORDER) do
+        if known == key then return i end
+    end
+    return #CAT_ORDER + 1
+end
+table.sort(CAT_KEYS, function(a, b)
+    local ra, rb = catRank(a), catRank(b)
+    if ra ~= rb then return ra < rb end
+    return a:lower() < b:lower()
+end)
+
+-- GROUPS[1] is the full list (menu order kept for existing comps), then one
+-- group per subfolder.
+local GROUPS = { { key = "all", label = "All LUTs", files = {} } }
+for _, entry in ipairs(LUT_FILES) do
+    table.insert(GROUPS[1].files, { label = entry.label, path = entry.path })
+end
+for _, key in ipairs(CAT_KEYS) do
+    local files = {}
+    for _, entry in ipairs(LUT_BUCKETS[key]) do
+        files[#files + 1] = { label = entry.short, path = entry.path }
+    end
+    GROUPS[#GROUPS + 1] = { key = key, label = CAT_LABEL[key] or key, files = files }
+end
+
 local DEFAULT_LUT_LABEL = "slay-04-film"
 
 local function findLutLabel(label)
-    for i, entry in ipairs(LUT_FILES) do
+    for i, entry in ipairs(GROUPS[1].files) do
         if entry.label == label then return i end
     end
     return 0
 end
+
+local DEFAULT_LUT_INDEX = findLutLabel(DEFAULT_LUT_LABEL)
+local DEFAULT_LUT_PATH = (GROUPS[1].files[DEFAULT_LUT_INDEX] or {}).path or ""
 
 -- ---------------------------------------------------------------- .cube parser
 
@@ -179,6 +247,14 @@ end
 
 -- ---------------------------------------------------------------- UI
 
+-- Input ids: the full list keeps "LutSel" so compositions saved before the
+-- category menu still resolve, each category is "Lut_<key>".
+local function lutInputId(cat)
+    local group = GROUPS[cat]
+    if not group then return "LutSel" end
+    return (cat == 1) and "LutSel" or ("Lut_" .. group.key)
+end
+
 function Create()
     InImage = self:AddInput("Input", "Input", {
         LINKID_DataType = "Image",
@@ -190,25 +266,44 @@ function Create()
         LINK_Main = 1,
     })
 
-    local lutOpts = {
+    local catOpts = {
         LINKID_DataType = "Number",
         INPID_InputControl = "ComboControl",
-        INP_Default = findLutLabel(DEFAULT_LUT_LABEL),
+        INP_Default = 0,
         INP_Integer = true,
         INP_DoNotifyChanged = true,
-        INP_InitialNotify = false,
-        INPS_StatusText = "LUTs found in the LUT folder when Fusion started; the file field below shows the active LUT.",
+        INP_InitialNotify = true,
+        INPS_StatusText = "The LUT folder's subfolders. The LUT menu below lists only the chosen category.",
     }
-    lutOpts[#lutOpts + 1] = { CCS_AddString = "(file below)" }
-    for _, entry in ipairs(LUT_FILES) do
-        lutOpts[#lutOpts + 1] = { CCS_AddString = entry.label }
+    for _, group in ipairs(GROUPS) do
+        catOpts[#catOpts + 1] = { CCS_AddString = group.label }
     end
-    InLutSel = self:AddInput("LUT", "LutSel", lutOpts)
+    InCategory = self:AddInput("Category", "Category", catOpts)
+
+    for i, group in ipairs(GROUPS) do
+        local opts = {
+            LINKID_DataType = "Number",
+            INPID_InputControl = "ComboControl",
+            INP_Default = (i == 1) and DEFAULT_LUT_INDEX or 1,
+            INP_Integer = true,
+            INP_DoNotifyChanged = true,
+            INP_InitialNotify = false,
+            IC_Visible = (i == 1),
+            INPS_StatusText = (i == 1)
+                and "Every LUT in the library; the file field below shows the active one."
+                or (group.label .. ": " .. #group.files .. " LUTs. The first entry uses the file field below."),
+        }
+        opts[#opts + 1] = { CCS_AddString = "(file below)" }
+        for _, entry in ipairs(group.files) do
+            opts[#opts + 1] = { CCS_AddString = entry.label }
+        end
+        self:AddInput("LUT", lutInputId(i), opts)
+    end
 
     InLutFile = self:AddInput("LUT file", "LutFile", {
         LINKID_DataType = "Text",
         INPID_InputControl = "FileControl",
-        INPS_DefaultText = (LUT_FILES[findLutLabel(DEFAULT_LUT_LABEL)] or {}).path or "",
+        INPS_DefaultText = DEFAULT_LUT_PATH,
         INP_DoNotifyChanged = true,
         INP_InitialNotify = false,
         INPS_StatusText = "Shows the active LUT. Type or browse for a .cube outside the list; the menu then switches to (file below).",
@@ -281,88 +376,129 @@ end
 
 local syncing = false
 
-local function resolvePath(sel, file)
-    sel = math.floor((sel or 0) + 0.5)
-    if sel >= 1 and LUT_FILES[sel] then return LUT_FILES[sel].path end
-    if file and file ~= "" then
-        local ok, mapped = pcall(function() return self.Comp:MapPath(file) end)
-        if ok and mapped and mapped ~= "" then return mapped end
-        return file
+local function mapFilename(file)
+    if not file or file == "" then return nil end
+    local ok, mapped = pcall(function() return self.Comp:MapPath(file) end)
+    if ok and mapped and mapped ~= "" then return mapped end
+    return file
+end
+
+local function resolveEntry(cat, idx)
+    local group = GROUPS[cat]
+    if not group then return nil end
+    idx = math.floor((idx or 0) + 0.5)
+    if idx >= 1 then
+        local entry = group.files[idx]
+        if entry then return entry.path end
     end
     return nil
 end
 
--- Fusion does not document how to write a Text input from inside a fuse; try the
--- known forms in order and verify that the value actually took.
-local fieldMethod = nil
+local function groupOfInput(inp)
+    for i = 1, #GROUPS do
+        local candidate = self:FindInput(lutInputId(i))
+        if candidate and candidate == inp then return i end
+    end
+    return nil
+end
+
+local function currentCategory(time)
+    local cat = 1
+    local ok = pcall(function() cat = math.floor(InCategory:GetSource(time).Value + 0.5) + 1 end)
+    if not ok or cat < 1 or cat > #GROUPS then cat = 1 end
+    return cat
+end
+
+-- LUT shown by a category (or its file field when the menu is on the first entry).
+local function pathAtCategory(cat, time)
+    local idx = 0
+    local input = self:FindInput(lutInputId(cat))
+    if input then
+        local ok, value = pcall(function() return input:GetSource(time).Value end)
+        if ok then idx = math.floor(value + 0.5) end
+    end
+    local path = resolveEntry(cat, idx)
+    if path then return path end
+    local file = nil
+    pcall(function() file = InLutFile:GetSource(time).Value end)
+    return mapFilename(file)
+end
+
+-- Fusion does not document how to write a Text input from inside a fuse; use the
+-- tool setter first, then fall back to the input itself, verifying each write.
+local function readField()
+    local ok, value = pcall(function() return self:GetInput("LutFile") end)
+    if ok then return value end
+    local ok2, source = pcall(function() return InLutFile:GetSource(0).Value end)
+    if ok2 then return source end
+    return nil
+end
 
 local function setTextField(inp, text, time)
     if not inp then return end
+    if readField() == text then return true end
     local attempts = {
+        function() self:SetInput("LutFile", text) end,
         function() inp:SetSource(text, time) end,
         function() inp:SetSource(Text(text), time) end,
-        function() self:SetInput("LutFile", text) end,
     }
-    local first = fieldMethod
-    for i, attempt in ipairs(attempts) do
-        if not fieldMethod or fieldMethod == i then
-            local ok = pcall(attempt)
-            if ok then
-                local readOk, current = pcall(function() return inp:GetSource(time).Value end)
-                if readOk and current == text then
-                    fieldMethod = i
-                    return true
+    for _, attempt in ipairs(attempts) do
+        if pcall(attempt) and readField() == text then
+            return true
+        end
+    end
+    print("PSN_LUT: could not update the LUT file field")
+    return false
+end
+
+local function notifyChanged(inp, param, time)
+    if inp == InCategory then
+        local cat = math.floor(param.Value + 0.5) + 1
+        for i = 1, #GROUPS do
+            local input = self:FindInput(lutInputId(i))
+            if input then input:SetAttrs({ IC_Visible = (i == cat) }) end
+        end
+        local path = pathAtCategory(cat, time)
+        if path then setTextField(InLutFile, path, time) end
+    else
+        local gi = groupOfInput(inp)
+        if gi then
+            local path = resolveEntry(gi, param.Value)
+            if path then setTextField(InLutFile, path, time) end
+        elseif inp == InLutFile then
+            local value = param.Value
+            if value and value ~= "" then
+                local cat = currentCategory(time)
+                local idx = 0
+                local input = self:FindInput(lutInputId(cat))
+                if input then
+                    pcall(function() idx = math.floor(input:GetSource(time).Value + 0.5) end)
+                end
+                local selected = resolveEntry(cat, idx)
+                -- ignore the echo from our own field update
+                if not selected or value ~= selected then
+                    if input then pcall(function() input:SetSource(Number(0), time) end) end
+                end
+                CACHE[mapFilename(value) or value] = nil
+            end
+        elseif inp == InReload then
+            if param.Value > 0.5 then
+                local path = pathAtCategory(currentCategory(time), time)
+                if path then
+                    CACHE[path] = nil
+                    loadLUT(path)
                 end
             end
         end
     end
-    if not first then
-        print("PSN_LUT: could not update the LUT file field")
-    end
-    return false
-end
-
-local function timePath(time)
-    local sel = 0
-    local ok1 = pcall(function() sel = InLutSel:GetSource(time).Value end)
-    local file = nil
-    local ok2 = pcall(function() file = InLutFile:GetSource(time).Value end)
-    if not ok1 then sel = 0 end
-    if not ok2 then file = nil end
-    return resolvePath(sel, file)
 end
 
 function NotifyChanged(inp, param, time)
     if syncing then return end
     syncing = true
-    if inp == InLutSel then
-        local sel = math.floor(param.Value + 0.5)
-        if sel >= 1 and LUT_FILES[sel] then
-            -- keep the file field showing the LUT that is actually used
-            setTextField(InLutFile, LUT_FILES[sel].path, time)
-        end
-    elseif inp == InLutFile then
-        local value = param.Value
-        if value and value ~= "" then
-            -- ignore the echo from our own field update
-            local sel = math.floor(InLutSel:GetSource(time).Value + 0.5)
-            local selectedPath = (sel >= 1 and LUT_FILES[sel]) and LUT_FILES[sel].path or nil
-            if not selectedPath or value ~= selectedPath then
-                pcall(function() InLutSel:SetSource(Number(0), time) end)
-            end
-            local path = timePath(time)
-            if path then CACHE[path] = nil end
-        end
-    elseif inp == InReload then
-        if param.Value > 0.5 then
-            local path = timePath(time)
-            if path then
-                CACHE[path] = nil
-                loadLUT(path)
-            end
-        end
-    end
+    local ok, err = pcall(notifyChanged, inp, param, time)
     syncing = false
+    if not ok then print("PSN_LUT: notify error: " .. tostring(err)) end
 end
 
 -- ---------------------------------------------------------------- processing
@@ -498,7 +634,15 @@ function Process(req)
     if not src then OutImage:Set(req, nil) return end
     if InPreview:GetValue(req).Value < 0.5 then OutImage:Set(req, src) return end
 
-    local path = resolvePath(InLutSel:GetValue(req).Value, InLutFile:GetValue(req).Value)
+    local cat = math.floor(InCategory:GetValue(req).Value + 0.5) + 1
+    if cat < 1 or cat > #GROUPS then cat = 1 end
+    local idx = 0
+    local groupInput = self:FindInput(lutInputId(cat))
+    if groupInput then
+        local ok, value = pcall(function() return groupInput:GetValue(req).Value end)
+        if ok then idx = math.floor(value + 0.5) end
+    end
+    local path = resolveEntry(cat, idx) or mapFilename(InLutFile:GetValue(req).Value)
     if not path or path == "" then OutImage:Set(req, src) return end
 
     local lut = loadLUT(path)
