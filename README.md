@@ -71,6 +71,28 @@ Download [PSN_BrightnessContrast.fuse](Fuses/PSN_BrightnessContrast.fuse), copy 
 
 See the [usage guide and validation details](docs/PSN_BrightnessContrast.md).
 
+## PSN_LUT
+
+Photoshop-style **Color Lookup**: applies a `.cube` LUT to the image. The free LUT packs used by
+PSN_VE_NeuralRender — 5 **slay** looks and 296 **film** emulations — are listed by category in one
+dropdown, and any other `.cube` can be loaded from the file field.
+
+- **Mix 0–100** (default 100), **Preview**, tetrahedral or trilinear interpolation.
+- **Display-referred** by default (matches Photoshop on 8-bit sRGB); a **Linear** option puts the
+  sRGB transfer around the LUT for linear-light comps.
+- Premultiplied alpha handled, HDR over-range preserved, 1D and 3D `.cube`, `DOMAIN_MIN/MAX`.
+- Default: **slay-04-film**.
+
+Download [PSN_LUT.fuse](Fuses/PSN_LUT.fuse), copy it to `%APPDATA%\Blackmagic Design\Fusion\Fuses\`,
+restart Fusion, then use **Shift+Space → PSN_LUT**. The LUT folder is scanned at startup; point
+**LUT folder** at your own packs and restart, or load a single file through **LUT file**.
+
+Validated in Fusion 20 against an independent numpy implementation: 10 render cases within 1/255
+per channel, plus alpha, HDR, 1D, domain and bypass behaviour checks. See the
+[usage guide and validation details](docs/PSN_LUT.md).
+
+
+
 ## PSN_SelectiveColor
 
 A Lua Fuse that provides Photoshop-style Selective Color controls:

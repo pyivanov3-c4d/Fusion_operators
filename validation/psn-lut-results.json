@@ -1,0 +1,139 @@
+{
+  "fuse": "PSN_LUT 1.0",
+  "fusion": "20.0.0.50",
+  "chart": "tests/photofilter/input.png (256x64)",
+  "render_cases": [
+    {
+      "id": "passthrough",
+      "max": 0,
+      "mean": 0.0,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "film_tetra",
+      "max": 1,
+      "mean": 0.4962,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "film_trilinear",
+      "max": 1,
+      "mean": 0.4962,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "film_mix50",
+      "max": 1,
+      "mean": 0.5147,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "bw13_tetra",
+      "max": 1,
+      "mean": 0.5029,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "print13_tetra",
+      "max": 1,
+      "mean": 0.4986,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "print13_trilinear",
+      "max": 1,
+      "mean": 0.5108,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "amber33_tetra",
+      "max": 1,
+      "mean": 0.4339,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "missing_file",
+      "max": 0,
+      "mean": 0.0,
+      "over1": 0,
+      "pixels": 49152
+    },
+    {
+      "id": "linear_mode",
+      "max": 1,
+      "mean": 0.4942,
+      "over1": 0,
+      "pixels": 49152
+    }
+  ],
+  "behaviour": [
+    {
+      "case": "alpha_premultiplied",
+      "expect": "LUT reads unpremultiplied colour",
+      "observed": "[63,127,191,128] for 0.5 red at alpha 0.5 with a constant 0.25/0.5/0.75 LUT",
+      "passed": true
+    },
+    {
+      "case": "alpha_straight",
+      "expect": "LUT reads premultiplied values",
+      "observed": "[125,253,255,128]",
+      "passed": true
+    },
+    {
+      "case": "hdr_over_range_preserved",
+      "expect": "LUT(1.0)+1.0",
+      "observed": "[32,38,44] after a 0.1 gain",
+      "passed": true
+    },
+    {
+      "case": "hdr_over_range_clipped",
+      "expect": "LUT(1.0)",
+      "observed": "[6,12,19] after a 0.1 gain",
+      "passed": true
+    },
+    {
+      "case": "one_d_cube",
+      "expect": "1-input",
+      "observed": "[191,126,63] for input [0.25,0.5,0.75]",
+      "passed": true
+    },
+    {
+      "case": "domain_max_2",
+      "expect": "input 1.0 maps to mid-cube",
+      "observed": "[127,127,127]",
+      "passed": true
+    },
+    {
+      "case": "preview_off",
+      "expect": "exact passthrough",
+      "observed": "[77,153,230]",
+      "passed": true
+    },
+    {
+      "case": "mix_zero",
+      "expect": "exact passthrough",
+      "observed": "[77,153,230]",
+      "passed": true
+    },
+    {
+      "case": "combo_selection",
+      "expect": "chosen LUT loads and its path fills the file field",
+      "observed": "LutFile switched to the agfa_apx_100 path",
+      "passed": true
+    },
+    {
+      "case": "missing_file",
+      "expect": "bypass and one console report",
+      "observed": "max 0/255 vs source, console: cannot load",
+      "passed": true
+    }
+  ]
+}

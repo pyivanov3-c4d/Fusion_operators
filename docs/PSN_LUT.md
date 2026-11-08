@@ -1,0 +1,114 @@
+# PSN_LUT
+
+Photoshop-style **Color Lookup** for Fusion: applies a `.cube` LUT to the image, with the free
+LUT packs bundled for the Neural Render operator listed by category in one dropdown.
+
+## Controls
+
+- **LUT** — every `.cube` found in the LUT folder when Fusion started, shown as
+  `category/name` (`film/bw/...`, `film/print/...`, `slay-...`). The first entry,
+  **(file below)**, means "use the file field".
+- **LUT file** — always shows the LUT that is in use. Type or browse for a `.cube` anywhere on
+  disk; the menu switches to **(file below)**. Choosing a menu entry writes that entry's path
+  here.
+- **Mix (%)** — 0–100, default **100**. Blended in the LUT's own encoding, between the original
+  value and the LUT result.
+- **Preview** — bypasses the node.
+- **Fusion Options** (collapsed)
+  - **Input encoding** — *Display-referred (values as supplied)* is the default and matches
+    Photoshop on 8-bit sRGB material. *Linear* encodes the image to sRGB with the sRGB transfer
+    curve, applies the LUT and decodes back; use it in a linear-light comp.
+  - **Interpolation** — **Tetrahedral** (default) or **Trilinear**. On the 13³ pack LUTs the two
+    differ by up to 8 levels; on the 33³ slay LUTs by at most 1 level in the tested material.
+  - **Preserve over-range** — default on. HDR and negative values keep their excursion instead
+    of being clipped at the LUT's edge; only visible in a float comp.
+  - **Pre-Divide / Post-Multiply** — default on for premultiplied RGB. The LUT is applied to
+    unpremultiplied colour and alpha is untouched.
+- **LUT library** (collapsed)
+  - **LUT folder** — scanned when Fusion starts. Default
+    `C:\__Work\_DeepSeek\Fusion\samples\luts`; the user's
+    `%APPDATA%\Blackmagic Design\Fusion\LUTs` is scanned too and listed as `user/...`.
+  - **Reload LUT** — re-reads the selected file after it changed on disk.
+
+Default: **slay-04-film** (33³ film look), Mix 100, tetrahedral.
+
+## LUT library
+
+| Folder | Files | Source |
+| --- | --- | --- |
+| `slay-*.cube` | 5 | [slaycamera/luts](https://github.com/slaycamera/luts), CC BY 4.0 |
+| `film/` | 296 | [YahiaAngelo/Film-Luts](https://github.com/YahiaAngelo/Film-Luts), G'MIC film emulations |
+
+See `samples/luts/ATTRIBUTION.txt` for the licences. Both packs are display-referred, so the
+default encoding applies them to the values Fusion supplies.
+
+The list is built at startup. Add files to the folder and restart Fusion to see them; a single
+LUT outside the folder can be used immediately through **LUT file**.
+
+## Format support
+
+- 3D `.cube` (`LUT_3D_SIZE`), 1D `.cube` (`LUT_1D_SIZE`), and a file carrying both (1D stage
+  first, then the cube, as the spec orders them).
+- `DOMAIN_MIN` / `DOMAIN_MAX` and `LUT_3D_INPUT_RANGE`; `.cube` red-fastest value order.
+- Not supported: `.3dl`, `.spi1d`, `.look`, `.asv` presets, ICC profiles, log/ACES conversions.
+
+## Method
+
+The cube is parsed once per file and cached for the session. Per pixel: clamp to the cube domain,
+optional sRGB transfer, interpolate (tetrahedral by default), blend with Mix, optional transfer
+back, restore any over-range residual, re-apply alpha. Processing is multithreaded through
+`MultiProcessPixels`.
+
+## Validation
+
+Tested in Fusion Studio 20.0.0.50 against an independent numpy implementation of the same
+definition (3D parse, domain, tetrahedral/trilinear, mix, transfer), rendering a 256×64 colour
+chart:
+
+| Case | Max | Mean |
+| --- | --- | --- |
+| passthrough (no LUT) | 0/255 | 0.00 |
+| slay-04-film, tetrahedral | 1/255 | 0.50 |
+| slay-04-film, trilinear | 1/255 | 0.50 |
+| slay-04-film, Mix 50 | 1/255 | 0.51 |
+| agfa_apx_100 (13³) | 1/255 | 0.50 |
+| kodak_2383_cuspclip (13³), tetra / trilinear | 1/255 | 0.50 / 0.51 |
+| slay-01-amber (33³) | 1/255 | 0.43 |
+| missing file (bypass) | 0/255 | 0.00 |
+| linear mode | 1/255 | 0.49 |
+
+The residual half-level is the 8-bit write (the reference rounds, Fusion truncates). Reports:
+`tests/lut/results.json`; renders in `renders/lut/cases/`.
+
+Behaviour checks, all passing with a clean console:
+
+- premultiplied vs straight alpha — the LUT reads unpremultiplied colour and alpha survives;
+- HDR over-range kept (32,38,44) against clipped (6,12,19) in a float32 chain;
+- 1D `.cube` (256-entry invert) exact;
+- `DOMAIN_MAX 2` cube maps input 1.0 to mid-grey;
+- Preview off and Mix 0 are exact passthrough;
+- combo selection loads the chosen file and writes its path into the file field;
+- a missing or unreadable file leaves the image untouched and reports once in the console.
+
+Local demo: `PSN_LUT-Demo.comp` (Loader → PSN_LUT → Saver, slay-04-film).
+
+## Limits
+
+- About 0.4–1.0 s per 1.5 MP frame on this machine (Lua per-pixel processing).
+- The menu reflects the folder at startup, not live changes.
+- 1D-only and mixed 1D+3D files are supported, but the bundled packs are all 3D.
+
+## Installation
+
+Copy `PSN_LUT.fuse` to `%APPDATA%\Blackmagic Design\Fusion\Fuses\` and restart Fusion. Press
+**Shift+Space** and search **PSN_LUT**. Registry ID: `Fuse.PSN_LUT`. No Python or MCP is needed
+to use the node.
+
+## References
+
+- [Adobe: Color Lookup adjustment](https://helpx.adobe.com/photoshop/using/adjusting-color-lookup.html)
+- [slaycamera/luts](https://github.com/slaycamera/luts) — CC BY 4.0
+- [YahiaAngelo/Film-Luts](https://github.com/YahiaAngelo/Film-Luts) — MIT repository, LUTs shared for creative and educational use
+- [G'MIC film emulation presets](https://gmic.eu)
+
+Independent implementation; no Adobe code is included.
