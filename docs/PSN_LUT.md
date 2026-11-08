@@ -26,7 +26,7 @@ LUT packs bundled for the Neural Render operator listed by category in one dropd
     unpremultiplied colour and alpha is untouched.
 - **LUT library** (collapsed)
   - **LUT folder** — scanned when Fusion starts. Default
-    `C:\__Work\_DeepSeek\Fusion\samples\luts`; the user's
+    `C:\__Work\_DeepSeek\Fusion\luts`; the user's
     `%APPDATA%\Blackmagic Design\Fusion\LUTs` is scanned too and listed as `user/...`.
   - **Reload LUT** — re-reads the selected file after it changed on disk.
 
@@ -39,7 +39,7 @@ Default: **slay-04-film** (33³ film look), Mix 100, tetrahedral.
 | `slay-*.cube` | 5 | [slaycamera/luts](https://github.com/slaycamera/luts), CC BY 4.0 |
 | `film/` | 296 | [YahiaAngelo/Film-Luts](https://github.com/YahiaAngelo/Film-Luts), G'MIC film emulations |
 
-See `samples/luts/ATTRIBUTION.txt` for the licences. Both packs are display-referred, so the
+See `luts/ATTRIBUTION.txt` for the licences. Both packs are display-referred, so the
 default encoding applies them to the values Fusion supplies.
 
 The list is built at startup. Add files to the folder and restart Fusion to see them; a single

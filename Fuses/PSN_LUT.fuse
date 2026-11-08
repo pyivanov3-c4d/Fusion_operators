@@ -21,7 +21,7 @@ FuRegisterClass("PSN_LUT", CT_Tool, {
 
 -- The list is scanned once when Fusion starts: the workspace packs first, then
 -- the user's own Fusion LUTs folder.
-local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\samples\luts]]
+local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\luts]]
 local LUT_USER_FOLDER = ((os.getenv("APPDATA") or "") .. "\\Blackmagic Design\\Fusion\\LUTs")
 
 local LUT_FILES = {}
