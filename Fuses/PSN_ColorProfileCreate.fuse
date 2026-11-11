@@ -1,4 +1,4 @@
--- PSN_ColorProfileCreate.fuse   (profile format v4)
+-- PSN_ColorProfileCreate.fuse   (profile format v5)
 -- Builds a reusable, brand-neutral colour-style profile (*.psncol.json) from N
 -- finished reference images. Companion operator: PSN_ColorProfileMatch.
 --
@@ -25,7 +25,12 @@ FuRegisterClass("PSN_ColorProfileCreate", CT_Tool, {
 local NREFS = 16
 local MAX_SAMPLES = 120000
 local HOLD_TOL = 30          -- degrees, used to keep accent colours out of the statistics
-local PROFILE_VERSION = 4
+local PROFILE_VERSION = 5
+local HUE_SECTORS = 24       -- 15 degree sectors
+local HUE_ZONES = 3          -- dark / mid / light (by L: <0.4, <0.7, rest)
+local CAP_BINS = 48          -- chroma histogram resolution per sector/zone
+local CAP_BIN_W = 0.0125
+local CAP_PCT = 0.85         -- chroma that the style rarely exceeds
 local TAG = "PSN_ColorProfileCreate: "
 
 local cacheKeys = {}
@@ -375,6 +380,12 @@ local function excluded(L, A, B, holds)
 	return false
 end
 
+local function zone_of(L)
+	if L < 0.4 then return 1 end
+	if L < 0.7 then return 2 end
+	return 3
+end
+
 local function analyse(img, bins, maxSamples, holds)
 	local w, h = img.Width, img.Height
 	if not w or w < 1 or h < 1 then return nil end
@@ -412,7 +423,11 @@ local function analyse(img, bins, maxSamples, holds)
 	local res = {
 		n = total, black = black, white = white,
 		bc = {}, cn = {}, sL = {}, sL2 = {}, sA = {}, sA2 = {}, sB = {}, sB2 = {},
+		hn = 0, hd = {}, hh = {}, hraw = {},
 	}
+	for i = 1, HUE_SECTORS do res.hd[i] = 0 end
+	for i = 1, HUE_SECTORS * HUE_ZONES do res.hraw[i] = 0 end
+	for i = 1, HUE_SECTORS * HUE_ZONES * CAP_BINS do res.hh[i] = 0 end
 	for i = 1, bins do
 		res.bc[i], res.cn[i], res.sL[i], res.sL2[i] = 0, 0, 0, 0
 		res.sA[i], res.sA2[i], res.sB[i], res.sB2[i] = 0, 0, 0, 0
@@ -440,6 +455,21 @@ local function analyse(img, bins, maxSamples, holds)
 					res.sA2[bi] = res.sA2[bi] + A * A
 					res.sB[bi] = res.sB[bi] + B
 					res.sB2[bi] = res.sB2[bi] + B * B
+					local C = math.sqrt(A * A + B * B)
+					if C > 0.05 then
+						local hd = math.deg(math.atan2(B, A))
+						if hd < 0 then hd = hd + 360 end
+						local sct = math.floor(hd / (360 / HUE_SECTORS))
+						if sct > HUE_SECTORS - 1 then sct = HUE_SECTORS - 1 end
+						local zn = zone_of(L) - 1
+						local cb = math.floor(C / CAP_BIN_W)
+						if cb > CAP_BINS - 1 then cb = CAP_BINS - 1 end
+						res.hn = res.hn + 1
+						res.hd[sct + 1] = res.hd[sct + 1] + 1
+						res.hraw[zn * HUE_SECTORS + sct + 1] = res.hraw[zn * HUE_SECTORS + sct + 1] + 1
+						local hi = (zn * HUE_SECTORS + sct) * CAP_BINS + cb + 1
+						res.hh[hi] = res.hh[hi] + 1
+					end
 				end
 			end
 			x = x + stride
@@ -456,7 +486,11 @@ end
 
 local function new_pool(bins)
 	local p = { wsum = 0, black = 0, white = 0, nraw = 0, bc = {}, cn = {}, rawcn = {},
-		sL = {}, sL2 = {}, sA = {}, sA2 = {}, sB = {}, sB2 = {} }
+		sL = {}, sL2 = {}, sA = {}, sA2 = {}, sB = {}, sB2 = {},
+		hn = 0, hd = {}, hh = {}, hraw = {} }
+	for i = 1, HUE_SECTORS do p.hd[i] = 0 end
+	for i = 1, HUE_SECTORS * HUE_ZONES do p.hraw[i] = 0 end
+	for i = 1, HUE_SECTORS * HUE_ZONES * CAP_BINS do p.hh[i] = 0 end
 	for i = 1, bins do
 		p.bc[i], p.cn[i], p.rawcn[i] = 0, 0, 0
 		p.sL[i], p.sL2[i], p.sA[i], p.sA2[i], p.sB[i], p.sB2[i] = 0, 0, 0, 0, 0, 0
@@ -470,6 +504,10 @@ local function pool_add(pool, res, w, bins)
 	pool.black = pool.black + res.black * w
 	pool.white = pool.white + res.white * w
 	pool.nraw = pool.nraw + res.n
+	pool.hn = pool.hn + res.hn * f
+	for i = 1, HUE_SECTORS do pool.hd[i] = pool.hd[i] + res.hd[i] * f end
+	for i = 1, HUE_SECTORS * HUE_ZONES do pool.hraw[i] = pool.hraw[i] + res.hraw[i] end
+	for i = 1, HUE_SECTORS * HUE_ZONES * CAP_BINS do pool.hh[i] = pool.hh[i] + res.hh[i] * f end
 	for i = 1, bins do
 		local nChrom = res.cn[i]
 		pool.bc[i] = pool.bc[i] + res.bc[i] * f
@@ -556,6 +594,58 @@ local function finalize(pool, bins, minBin)
 	out.Am, out.As, out.Bm, out.Bs = filled(out.Am), filled(out.As), filled(out.Bm), filled(out.Bs)
 
 	out.glob = { gLm, gLs, gAm, gAs, gBm, gBs }
+
+	-- hue gamut of the style: how populated each hue sector is, and the chroma
+	-- the style rarely exceeds in each hue sector / lightness zone
+	local S, Z = HUE_SECTORS, HUE_ZONES
+	local dens = {}
+	for s = 1, S do dens[s] = (pool.hn > 0) and (pool.hd[s] / pool.hn) or 0 end
+	local cap, okc = {}, {}
+	for z = 0, Z - 1 do
+		cap[z + 1], okc[z + 1] = {}, {}
+		for s = 0, S - 1 do
+			local base = (z * S + s) * CAP_BINS
+			local tot = 0
+			for b = 1, CAP_BINS do tot = tot + pool.hh[base + b] end
+			if pool.hraw[z * S + s + 1] >= 60 and tot > 0 then
+				local target, acc, val = tot * CAP_PCT, 0, CAP_BINS * CAP_BIN_W
+				for b = 1, CAP_BINS do
+					local m = pool.hh[base + b]
+					if acc + m >= target then
+						val = ((b - 1) + (target - acc) / math.max(m, 1e-12)) * CAP_BIN_W
+						break
+					end
+					acc = acc + m
+				end
+				cap[z + 1][s + 1] = val
+				okc[z + 1][s + 1] = true
+			else
+				okc[z + 1][s + 1] = false
+			end
+		end
+	end
+	-- cells the references never visit get another zone's value for that hue if
+	-- there is one, otherwise a low floor (the style has no such colours, so the
+	-- matcher desaturates them instead of inventing a limit)
+	local filledCap = {}
+	for z = 1, Z do
+		filledCap[z] = {}
+		for s = 1, S do
+			if okc[z][s] then filledCap[z][s] = cap[z][s]
+			else
+				local v
+				for z2 = 1, Z do
+					if okc[z2][s] and (not v or cap[z2][s] < v) then v = cap[z2][s] end
+				end
+				filledCap[z][s] = v or 0.08
+			end
+		end
+	end
+	out.hue = { dens = dens, cap = filledCap, capN = {} }
+	for z = 1, Z do
+		out.hue.capN[z] = {}
+		for s = 1, S do out.hue.capN[z][s] = pool.hraw[(z - 1) * S + s] end
+	end
 	return out
 end
 
@@ -789,6 +879,19 @@ local function write_profile(path, model, refs, bins, minBin, frame, palette, na
 			(i < bins) and "," or ""))
 	end
 	add("  ],")
+
+	local hue = fin.hue
+	add(string.format('  "hue": {"sectors": %d, "zones": %d, "cap_pct": %s,', HUE_SECTORS, HUE_ZONES, f6(CAP_PCT)))
+	local dl = {}
+	for s = 1, HUE_SECTORS do dl[#dl + 1] = f6(hue.dens[s]) end
+	add('    "dens": [' .. table.concat(dl, ", ") .. '],')
+	for z = 1, HUE_ZONES do
+		local cl, nl = {}, {}
+		for s = 1, HUE_SECTORS do cl[#cl + 1] = f6(hue.cap[z][s]); nl[#nl + 1] = string.format("%d", hue.capN[z][s]) end
+		add(string.format('    "cap%d": [%s],', z, table.concat(cl, ", ")))
+		add(string.format('    "n%d": [%s]%s', z, table.concat(nl, ", "), (z < HUE_ZONES) and "," or ""))
+	end
+	add("  },")
 
 	add('  "palette": [')
 	for i, c in ipairs(palette) do

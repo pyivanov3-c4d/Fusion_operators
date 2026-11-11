@@ -1,4 +1,4 @@
-# PSN_ColorProfileCreate (profile format v4)
+# PSN_ColorProfileCreate (profile format v5)
 
 Builds a reusable, brand-neutral colour-style profile (`*.psncol.json`) from finished reference images. `PSN_ColorProfileMatch` applies it to any other image. Nothing is tied to one brand: a style is data in the file.
 
@@ -6,6 +6,7 @@ Builds a reusable, brand-neutral colour-style profile (`*.psncol.json`) from fin
 - **Chroma per luminance band**: mean of CIELab `a`/`b` for each band, plus the global colour spread.
 - **Tonal distribution** (`p`): the share of pixels in each band, used for histogram tone matching.
 - **Tonal range**: pooled black and white points.
+- **Hue gamut** (v5): how populated each 15° hue sector is, and the chroma the style rarely exceeds (85th percentile) per hue sector and lightness zone (dark / mid / light). This is what lets the matcher turn hues the style never uses (e.g. cyan) into the nearest hue it does use, and limit saturation per hue.
 - **Palette** (optional): *anchor* colours (`snap`) and *accent* colours (`hold`).
 
 It is not a LUT: only target statistics are stored, so the matcher adapts to each incoming image.
@@ -30,7 +31,7 @@ It is not a LUT: only target statistics are stored, so the matcher adapts to eac
 If no palette is given, the palette already stored in the file is kept (and reported in the console).
 
 ## Profile file (v4)
-`format`, `version`, `name`, `created`, `space`, `sample_frame`, `bins`, `min_bin_pixels`, `refs[]`, `global` (black, white, mean/std of L/a/b), `luma[]` (per band: `t`, `n` raw samples, `p` share, `L`, `a`, `b` as `[mean, std]`), `palette[]` (`hex`, `mode`, `L`, `a`, `b`). L is 0–1; a/b are Lab units /100. v3 files still load in the matcher.
+`format`, `version` (5), `name`, `created`, `space`, `sample_frame`, `bins`, `min_bin_pixels`, `refs[]`, `global` (black, white, mean/std of L/a/b), `luma[]` (per band: `t`, `n` raw samples, `p` share, `L`, `a`, `b` as `[mean, std]`), `hue` (`sectors`, `zones`, `cap_pct`, `dens[]`, `cap1..3[]`, `n1..3[]`), `palette[]` (`hex`, `mode`, `L`, `a`, `b`). L is 0–1; a/b are Lab units /100. v3 and v4 files still load in the matcher (without the hue features).
 
 ## Changes from v3
 - Per-reference normalisation (v3 weighted by sample count: two large images were 34 % of a 9-image pool).
