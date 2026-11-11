@@ -25,7 +25,7 @@ It is not a LUT: only target statistics are stored, so the matcher adapts to eac
 - **Anchor Colours (hex)** — brand colours; the matcher rotates nearby hues onto them.
 - **Accent Colours (hex)** — colours the matcher never restyles. Their pixels are also kept out of the statistics so a small accent cannot skew a band.
 - **Luma Bands** (4–64, default 16), **Min Pixels per Band** (default 512; sparse bands are interpolated), **Sample Frame**.
-- **Auto Rebuild** — off by default. Off: the file is only written when **Build Profile** is pressed. On: also rewritten when settings or the reference set change; it refuses to overwrite a profile that had more references.
+- **Auto Rebuild** — **on by default**: the file is rewritten on the first draw and whenever settings or the reference set change; it refuses to overwrite a profile that had more references. Turned off, the file is written only when **Build Profile** is pressed — and that press only lands on the next evaluation (viewer refresh or one frame of scrubbing), because a momentary button cannot invalidate the node's cache.
 - **Profile File** — empty = `colorprofiles/profile.psncol.json` next to the comp; `Comp:` and other aliases work. The file is written to a temp file and swapped in.
 
 If no palette is given, the palette already stored in the file is kept (and reported in the console).
