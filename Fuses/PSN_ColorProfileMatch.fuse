@@ -1,0 +1,968 @@
+-- PSN_ColorProfileMatch.fuse   (reads profile format v5; v3/v4 files still load)
+-- Applies a colour-style profile written by PSN_ColorProfileCreate to an image.
+--
+-- Brand-neutral: everything that defines a look (cast, tonal distribution,
+-- range, palette) is read from the profile. The operator measures the incoming
+-- image itself, per luminance band, and moves it toward the profile:
+--   chroma : a' = (a - src_mean) * gain + src_mean + (tgt_mean - src_mean) * Cast
+--   tone   : histogram match of luminance to the profile's tonal distribution,
+--            blended by Tone Match (also moves black/white toward the profile's)
+-- Palette colours stored in the profile are held (never restyled) or snapped
+-- (rotated onto the brand hue). Skin tones have their own protect control.
+
+FuRegisterClass("PSN_ColorProfileMatch", CT_Tool, {
+	REGS_Name = "PSN_ColorProfileMatch",
+	REGS_Category = "PSN\\Color",
+	REGS_OpIconString = "PCM",
+	REGS_OpDescription = "Match an image to a colour-style profile built by PSN_ColorProfileCreate",
+	REG_NoMotionBlurCtrls = true,
+	REG_Fuse_NoEdit = false,
+	REG_Fuse_NoReload = false,
+})
+
+local TAG = "PSN_ColorProfileMatch: "
+local TONE_LUT = 256
+local HUE_POP_LO, HUE_POP_HI = 0.004, 0.012   -- sector share below which a hue counts as absent from the style
+local cachedPath, cachedRaw, cachedModel = nil, nil, nil
+
+---------------------------------------------------------------------------
+-- colour math (sRGB <-> CIELab D65, L/100, a/100, b/100)
+---------------------------------------------------------------------------
+
+local SRGB_N = 1024
+local srgb_dec, srgb_enc = {}, {}
+for i = 0, SRGB_N do
+	local t = i / SRGB_N
+	srgb_dec[i] = (t <= 0.04045) and (t / 12.92) or (((t + 0.055) / 1.055) ^ 2.4)
+	srgb_enc[i] = (t <= 0.0031308) and (t * 12.92) or (1.055 * (t ^ (1 / 2.4)) - 0.055)
+end
+
+local function to_lin(v)
+	if v <= 0 then return 0 end
+	if v >= 1 then return 1 end
+	local x = v * SRGB_N
+	local i = math.floor(x)
+	return srgb_dec[i] * (1 - (x - i)) + srgb_dec[i + 1] * (x - i)
+end
+
+local XN, YN, ZN = 0.95047, 1.0, 1.08883
+
+local function f_lab(t)
+	if t > 0.008856451679 then return t ^ (1 / 3) end
+	return 7.787037037 * t + 16 / 116
+end
+
+local function labf(r, g, b)
+	r = to_lin(r); g = to_lin(g); b = to_lin(b)
+	local x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / XN
+	local y = (0.2126729 * r + 0.7151522 * g + 0.0721750 * b)
+	local z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / ZN
+	local fx, fy, fz = f_lab(x), f_lab(y), f_lab(z)
+	return (116 * fy - 16) / 100, 5 * (fx - fy), 2 * (fy - fz)
+end
+
+local function enc(v)
+	if v <= 0 then return v * 12.92 end
+	if v >= 1 then return 1.055 * (v ^ (1 / 2.4)) - 0.055 end
+	local x = v * SRGB_N
+	local i = math.floor(x)
+	return srgb_enc[i] * (1 - (x - i)) + srgb_enc[i + 1] * (x - i)
+end
+
+-- inverse of f_lab, including its linear segment near black (the plain cube
+-- lifts dark colours: pure black came back as ~9/255 grey)
+local function finv(f)
+	local c = f * f * f
+	if c > 0.008856451679 then return c end
+	return (f - 16 / 116) / 7.787037037
+end
+
+local function rgbf(L, A, B)
+	if L < 0 then L = 0 elseif L > 1 then L = 1 end
+	local fy = (L * 100 + 16) / 116
+	local fx = fy + A * 100 / 500
+	local fz = fy - B * 100 / 200
+	local x = finv(fx) * XN
+	local y = finv(fy)
+	local z = finv(fz) * ZN
+	local r = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
+	local g = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
+	local b = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
+	return enc(r), enc(g), enc(b)
+end
+
+local function clampf(v, lo, hi)
+	if v < lo then return lo end
+	if v > hi then return hi end
+	return v
+end
+
+-- 0 below a, ramps to 1 at b, 1 until c, ramps to 0 at d
+local function trap(x, a, b, c, d)
+	if x <= a or x >= d then return 0 end
+	if x < b then return (x - a) / (b - a) end
+	if x <= c then return 1 end
+	return (d - x) / (d - c)
+end
+
+---------------------------------------------------------------------------
+-- minimal json reader (only what the profile writer emits)
+---------------------------------------------------------------------------
+
+local function json_decode(s)
+	local pos = 1
+	local parse_value
+
+	local function skip()
+		while true do
+			local c = s:sub(pos, pos)
+			if c == " " or c == "\t" or c == "\n" or c == "\r" then pos = pos + 1 else break end
+		end
+	end
+
+	local function parse_string()
+		pos = pos + 1
+		local out = {}
+		while true do
+			local c = s:sub(pos, pos)
+			if c == "" then error("json: unterminated string") end
+			if c == '"' then pos = pos + 1 break end
+			if c == "\\" then
+				local n = s:sub(pos + 1, pos + 1)
+				if n == "n" then out[#out + 1] = "\n"
+				elseif n == "t" then out[#out + 1] = "\t"
+				elseif n == "r" then out[#out + 1] = "\r"
+				else out[#out + 1] = n end
+				pos = pos + 2
+			else
+				out[#out + 1] = c
+				pos = pos + 1
+			end
+		end
+		return table.concat(out)
+	end
+
+	local function parse_number()
+		local start = pos
+		while pos <= #s do
+			local c = s:sub(pos, pos)
+			if c:match("[%-%+0-9eE%.]") then pos = pos + 1 else break end
+		end
+		return tonumber(s:sub(start, pos - 1))
+	end
+
+	local function parse_array()
+		pos = pos + 1
+		local arr = {}
+		skip()
+		if s:sub(pos, pos) == "]" then pos = pos + 1 return arr end
+		while true do
+			arr[#arr + 1] = parse_value()
+			skip()
+			local c = s:sub(pos, pos)
+			pos = pos + 1
+			if c == "]" then break end
+		end
+		return arr
+	end
+
+	local function parse_object()
+		pos = pos + 1
+		local obj = {}
+		skip()
+		if s:sub(pos, pos) == "}" then pos = pos + 1 return obj end
+		while true do
+			skip()
+			local k = parse_string()
+			skip()
+			pos = pos + 1 -- ':'
+			obj[k] = parse_value()
+			skip()
+			local c = s:sub(pos, pos)
+			pos = pos + 1
+			if c == "}" then break end
+		end
+		return obj
+	end
+
+	function parse_value()
+		skip()
+		local c = s:sub(pos, pos)
+		if c == "{" then return parse_object() end
+		if c == "[" then return parse_array() end
+		if c == '"' then return parse_string() end
+		if s:sub(pos, pos + 3) == "true" then pos = pos + 4 return true end
+		if s:sub(pos, pos + 4) == "false" then pos = pos + 5 return false end
+		if s:sub(pos, pos + 3) == "null" then pos = pos + 4 return nil end
+		return parse_number()
+	end
+
+	return parse_value()
+end
+
+---------------------------------------------------------------------------
+-- palette geometry (same definition as the Create operator)
+---------------------------------------------------------------------------
+
+local function entry_weight(p, C, ph, tol)
+	if C < 0.05 or p.c < 0.03 then return 0 end
+	local d = math.abs(ph - p.h)
+	if d > 180 then d = 360 - d end
+	if d >= tol then return 0 end
+	local w = 1 - (d / tol) ^ 2
+	local lo, hi = 0.25 * p.c, 0.5 * p.c
+	local g = (C - lo) / (hi - lo)
+	if g <= 0 then return 0 end
+	if g > 1 then g = 1 end
+	return w * g
+end
+
+-- anchor colours are specific colours: "near" means close in Lab, not just in hue
+local function anchor_weight(p, L, A, B, tol)
+	local dL = (L - p.L) * 0.6
+	local dA, dB = A - p.a, B - p.b
+	local d = math.sqrt(dL * dL + dA * dA + dB * dB)
+	if d >= tol then return 0 end
+	return 1 - (d / tol) ^ 2
+end
+
+---------------------------------------------------------------------------
+-- ui
+---------------------------------------------------------------------------
+
+local function slider(name, id, def, tip)
+	return self:AddInput(name, id, {
+		LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+		INP_Default = def, INP_MinScale = 0, INP_MaxScale = 1,
+		INP_MinAllowed = 0, INP_MaxAllowed = 1,
+		INPS_StatusText = tip,
+	})
+end
+
+local function check(name, id, def, tip)
+	return self:AddInput(name, id, {
+		LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl",
+		INP_Default = def, INP_Integer = true,
+		INPS_StatusText = tip,
+	})
+end
+
+function Create()
+	InImage = self:AddInput("Input", "Input", {
+		LINKID_DataType = "Image",
+		LINK_Main = 1,
+		INP_AcceptsDoD = false,
+	})
+	OutImage = self:AddOutput("Output", "Output", {
+		LINKID_DataType = "Image",
+		LINK_Main = 1,
+	})
+
+	InPath = self:AddInput("Profile File", "ProfileFile", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "FileControl",
+		INPS_StatusText = "Path to a *.psncol.json built by PSN_ColorProfileCreate. Empty = colorprofiles/profile.psncol.json next to the comp.",
+	})
+
+	-- the four controls most people need
+	self:BeginControlNest("Match", "MatchNest", true, {})
+	InStrength = slider("Strength", "Strength", 1, "Mix between the source image and the matched result.")
+	InColour = slider("Colour", "ColourAmount", 1, "Master amount of the colour restyle: cast, hue pull/gather, chroma limit and saturation together. 0 = colour untouched, 1 = the calibrated look.")
+	InToneMaster = slider("Tone", "ToneAmount", 1, "Master amount of the tonal restyle. 0 = source tone curve exactly, 1 = the Tone Match amount set under Advanced.")
+	InSkin = slider("Skin Protect", "SkinProtect", 0.5, "Pull skin-like hues back toward the source colour. 0 = skin is restyled like everything else, 1 = skin is untouched.")
+	self:EndControlNest()
+
+	-- fine control, collapsed by default
+	self:BeginControlNest("Advanced", "AdvancedNest", false, {})
+	InTone = slider("Tone Match", "ToneMatch", 0.25, "How far luminance is moved to the profile's tonal distribution and black/white points. 0 keeps the source tone curve exactly.")
+	InToneMax = self:AddInput("Max Tone Shift", "ToneMax", {
+		LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+		INP_Default = 0.15, INP_MinScale = 0.02, INP_MaxScale = 0.5,
+		INP_MinAllowed = 0.01, INP_MaxAllowed = 1,
+		INPS_StatusText = "Soft limit on how far any tone is moved (0-1 of the image's luminance range) before Tone Match is applied. Protects images dominated by one flat area.",
+	})
+	InHuePull = slider("Hue Pull", "HuePull", 0.8, "Rotates hues the style never uses (e.g. cyan) toward the nearest hue it does use (e.g. cold blue). Needs a v5 profile.")
+	InHueRange = self:AddInput("Hue Pull Range", "HuePullRange", {
+		LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+		INP_Default = 60, INP_Integer = true,
+		INP_MinScale = 10, INP_MaxScale = 120,
+		INP_MinAllowed = 1, INP_MaxAllowed = 180,
+		INPS_StatusText = "Largest hue rotation in degrees. Hues farther than this from any style hue are not rotated (only desaturated by Chroma Limit).",
+	})
+	InHueGather = slider("Hue Gather", "HueGather", 0.6, "Pulls every hue toward the dominant hue of its neighbourhood in the style (e.g. all blues toward the style's one cold blue). Needs a v5 profile.")
+	InChromaLimit = slider("Chroma Limit", "ChromaLimit", 0.85, "Pulls saturation down toward what the style reaches for that hue and lightness (the 85th percentile of the references). 0 = off. Needs a v5 profile.")
+	InLimLift = slider("Limit Lightens", "LimitLift", 0.8, "When Chroma Limit desaturates a light tone, also lighten it in proportion (a tint toward white instead of toward grey). 0 = off.")
+	InCast = slider("Cast Strength", "CastStrength", 0.85, "How much of the profile's colour cast is applied. 1 = full match of the band means, 0 = only the colour spread is matched.")
+	InSat = check("Match Saturation", "MatchSat", 1, "Scale chroma by the ratio of the profile's colour spread to the image's (whole image, clamped 0.6-1.5).")
+	InNeutral = slider("Neutral Protect", "KeepNeutral", 0.5, "How much near-neutral pixels (white walls, greys) are shielded from the colour shift. 1 = they stay clean, 0 = they take the profile's tint like everything else.")
+	InPreserve = check("Preserve Luminance", "PreserveLum", 0, "Keep the source luminance untouched and transfer chroma only.")
+	self:EndControlNest()
+
+	self:BeginControlNest("Palette", "PaletteNest", false, {})
+	InPalHold = slider("Palette Hold", "PalHold", 1, "How firmly content near a palette colour keeps its source colour. 0 disables holding.")
+	InPalSnap = slider("Palette Snap", "PalSnap", 0.5, "How far content near an anchor colour is rotated onto the anchor's hue. 0 disables snapping. Accent colours are never snapped.")
+	InColTol = self:AddInput("Colour Tolerance", "ColTol", {
+		LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+		INP_Default = 12, INP_Integer = true,
+		INP_MinScale = 3, INP_MaxScale = 40,
+		INP_MinAllowed = 1, INP_MaxAllowed = 100,
+		INPS_StatusText = "How close (Lab distance) a pixel must be to an anchor colour to be held. Accent colours use Hue Tolerance instead (any shade of that hue).",
+	})
+	InHueTol = self:AddInput("Hue Tolerance", "HueTol", {
+		LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+		INP_Default = 30, INP_Integer = true,
+		INP_MinScale = 5, INP_MaxScale = 60,
+		INP_MinAllowed = 1, INP_MaxAllowed = 180,
+		INPS_StatusText = "Half-width in degrees of each palette hue.",
+	})
+	InProtect = check("Protect Saturated", "ProtectSat", 0, "Blunt option: keep every strongly saturated colour near the source. Palette Hold is the targeted tool.")
+	self:EndControlNest()
+
+	self:BeginControlNest("Fusion Options", "FusionNest", false, {})
+	InSamples = self:AddInput("Analysis Samples", "Samples", {
+		LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+		INP_Default = 60000, INP_Integer = true,
+		INP_MinScale = 4000, INP_MaxScale = 400000,
+		INP_MinAllowed = 1000, INP_MaxAllowed = 4000000,
+		INPS_StatusText = "Pixels sampled to measure the incoming image. Higher = steadier, slower.",
+	})
+	InClamp = check("Clamp Output", "ClampOut", 1, "Keep the result inside 0-1. Disable to keep float overshoot where the gamut allows it.")
+	InAlpha = check("Pre-Divide / Post-Multiply", "PreDivide", 1, "Unpremultiply before matching, then restore alpha. Disable for straight alpha.")
+	self:EndControlNest()
+end
+
+---------------------------------------------------------------------------
+-- paths
+---------------------------------------------------------------------------
+
+local function map_path(p)
+	local comps = {}
+	local ok1, c1 = pcall(function() return self.Comp end)
+	if ok1 and c1 then comps[#comps + 1] = c1 end
+	local ok2, c2 = pcall(function() return comp end)
+	if ok2 and c2 then comps[#comps + 1] = c2 end
+	for _, c in ipairs(comps) do
+		local ok, m = pcall(function() return c:MapPath(p) end)
+		if ok and type(m) == "string" and m ~= "" and not m:match("^Comp:") then return m end
+	end
+	return p
+end
+
+local function resolve_path(raw)
+	local p = tostring(raw or "")
+	p = p:gsub('"', ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if p == "" then p = "Comp:colorprofiles\\profile.psncol.json" end
+	p = map_path(p)
+	if p:match("^Comp:") then p = "profile.psncol.json" end
+	return p
+end
+
+---------------------------------------------------------------------------
+-- statistics of the incoming image (in its own normalised luminance space)
+---------------------------------------------------------------------------
+
+local function percentile(hist, total, p)
+	if total <= 0 then return 0.0 end
+	local target = total * p
+	local acc = 0
+	for i = 1, 256 do
+		acc = acc + hist[i]
+		if acc >= target then return (i - 1) / 255 end
+	end
+	return 1.0
+end
+
+local function held(A, B, holds, tol)
+	if #holds == 0 then return false end
+	local C = math.sqrt(A * A + B * B)
+	if C < 0.05 then return false end
+	local ph = math.deg(math.atan2(B, A))
+	if ph < 0 then ph = ph + 360 end
+	for i = 1, #holds do
+		if entry_weight(holds[i], C, ph, 30) > 0.5 then return true end
+	end
+	return false
+end
+
+local function analyse(img, bins, maxSamples, holds, premul)
+	local w, h = img.Width, img.Height
+	if not w or w < 1 or h < 1 then return nil end
+	local stride = math.max(1, math.floor(math.sqrt((w * h) / (maxSamples or 60000))))
+
+	local hist = {}
+	for i = 1, 256 do hist[i] = 0 end
+	local total = 0
+	local px = Pixel()
+	local y = 0
+	while y < h do
+		local x = 0
+		while x < w do
+			img:GetPixel(x, y, px)
+			local a = px.A
+			if a >= 0.5 then
+				local fac = (premul and a < 0.999) and a or 1
+				local L = (labf(px.R / fac, px.G / fac, px.B / fac))
+				local idx = math.floor(L * 255) + 1
+				if idx < 1 then idx = 1 elseif idx > 256 then idx = 256 end
+				hist[idx] = hist[idx] + 1
+				total = total + 1
+			end
+			x = x + stride
+		end
+		y = y + stride
+	end
+	if total < 64 then return nil end
+
+	local black = percentile(hist, total, 0.005)
+	local white = percentile(hist, total, 0.995)
+	if white - black < 0.02 then black, white = 0.0, 1.0 end
+	local rng = white - black
+
+	local res = {
+		n = total, black = black, white = white,
+		bc = {}, cn = {}, sA = {}, sA2 = {}, sB = {}, sB2 = {},
+	}
+	for i = 1, bins do
+		res.bc[i], res.cn[i] = 0, 0
+		res.sA[i], res.sA2[i], res.sB[i], res.sB2[i] = 0, 0, 0, 0
+	end
+
+	y = 0
+	while y < h do
+		local x = 0
+		while x < w do
+			img:GetPixel(x, y, px)
+			local a = px.A
+			if a >= 0.5 then
+				local fac = (premul and a < 0.999) and a or 1
+				local L, A, B = labf(px.R / fac, px.G / fac, px.B / fac)
+				local t = clampf((L - black) / rng, 0, 1)
+				local bi = math.floor(t * bins)
+				if bi > bins - 1 then bi = bins - 1 end
+				bi = bi + 1
+				res.bc[bi] = res.bc[bi] + 1
+				if not held(A, B, holds, 30) then
+					res.cn[bi] = res.cn[bi] + 1
+					res.sA[bi] = res.sA[bi] + A
+					res.sA2[bi] = res.sA2[bi] + A * A
+					res.sB[bi] = res.sB[bi] + B
+					res.sB2[bi] = res.sB2[bi] + B * B
+				end
+			end
+			x = x + stride
+		end
+		y = y + stride
+	end
+	return res
+end
+
+---------------------------------------------------------------------------
+-- tone mapping: source CDF -> inverse target CDF, as a lookup table over the
+-- normalised luminance t in 0..1
+---------------------------------------------------------------------------
+
+local function build_tone_lut(ps, pt, bins)
+	local eps = 0.003
+	local function norm(p)
+		local q, s = {}, 0
+		for i = 1, bins do q[i] = (p[i] or 0) + eps; s = s + q[i] end
+		for i = 1, bins do q[i] = q[i] / s end
+		return q
+	end
+	local qs, qt = norm(ps), norm(pt)
+	local Es, Et = { [0] = 0 }, { [0] = 0 }
+	for i = 1, bins do Es[i] = Es[i - 1] + qs[i]; Et[i] = Et[i - 1] + qt[i] end
+	local lut = {}
+	for k = 0, TONE_LUT - 1 do
+		local t = k / (TONE_LUT - 1)
+		local x = t * bins
+		local bi = math.floor(x)
+		if bi > bins - 1 then bi = bins - 1 end
+		local u = Es[bi] + (x - bi) * qs[bi + 1]
+		local j = 0
+		while j < bins - 1 and Et[j + 1] < u do j = j + 1 end
+		local f2 = (u - Et[j]) / qt[j + 1]
+		if f2 < 0 then f2 = 0 elseif f2 > 1 then f2 = 1 end
+		lut[k] = (j + f2) / bins
+	end
+	return lut
+end
+
+---------------------------------------------------------------------------
+-- profile loading
+---------------------------------------------------------------------------
+
+local function load_profile(path)
+	local f = io.open(path, "r")
+	if not f then return nil, "cannot open " .. path end
+	local raw = f:read("*a")
+	f:close()
+	if raw == cachedRaw and cachedPath == path and cachedModel then
+		return cachedModel
+	end
+
+	local ok, doc = pcall(json_decode, raw)
+	if not ok or type(doc) ~= "table" then
+		return nil, "not a profile: " .. tostring(doc)
+	end
+	if doc.format ~= "PSN_ColorProfile" then
+		return nil, "wrong format tag in " .. path
+	end
+	if (doc.version or 1) < 3 then
+		return nil, "profile was built by an older version - rebuild it"
+	end
+	if (doc.space or "sRGB") ~= "sRGB" then
+		return nil, "profile was built for " .. tostring(doc.space)
+	end
+	if type(doc.luma) ~= "table" or #doc.luma < 2 then
+		return nil, "profile has no bands"
+	end
+
+	local bins = doc.bins
+	local m = {
+		bins = bins, path = path, name = doc.name or "",
+		tm = {}, ta = {}, tb = {}, p = {},
+		black = (doc.global and doc.global.black) or 0,
+		white = (doc.global and doc.global.white) or 1,
+		gsa = (doc.global and doc.global.a and doc.global.a[2]) or 0,
+		gsb = (doc.global and doc.global.b and doc.global.b[2]) or 0,
+	}
+	local total = 0
+	for i = 1, bins do
+		local b = doc.luma[i]
+		if not b then return nil, "band " .. i .. " missing" end
+		m.tm[i] = b.t or ((i - 0.5) / bins)
+		m.ta[i] = b.a[1] or 0
+		m.tb[i] = b.b[1] or 0
+		m.p[i] = b.p or b.n or 0     -- v3 files only have raw counts in "n"
+		total = total + m.p[i]
+	end
+	for i = 1, bins do m.p[i] = (total > 0) and (m.p[i] / total) or (1 / bins) end
+
+	m.palette = {}
+	for _, c in ipairs(doc.palette or doc.protect or {}) do
+		local e = { a = c.a or 0, b = c.b or 0, L = c.L or 0.5, mode = c.mode or "snap", hex = c.hex }
+		e.h = math.deg(math.atan2(e.b, e.a))
+		if e.h < 0 then e.h = e.h + 360 end
+		e.c = math.sqrt(e.a * e.a + e.b * e.b)
+		m.palette[#m.palette + 1] = e
+	end
+
+	-- hue gamut (v5): populated hue sectors and per-hue/lightness chroma limits
+	if type(doc.hue) == "table" and doc.hue.dens and doc.hue.cap1 then
+		local S = doc.hue.sectors or #doc.hue.dens
+		local function sample(arr, deg) -- circular linear interpolation between sector centres
+			local x = deg / (360 / S) - 0.5
+			local i0 = math.floor(x)
+			local f = x - i0
+			local a = arr[(i0 % S) + 1]
+			local b = arr[((i0 + 1) % S) + 1]
+			return a * (1 - f) + b * f
+		end
+		local popW, dH, popDist = {}, {}, {}
+		local capTab = { {}, {}, {} }
+		local dens = {}
+		for d = 0, 359 do dens[d] = sample(doc.hue.dens, d + 0.5) end
+		for d = 0, 359 do
+			local x = dens[d]
+			local w = 1 - clampf((x - HUE_POP_LO) / (HUE_POP_HI - HUE_POP_LO), 0, 1)
+			popW[d] = w
+			dH[d], popDist[d] = 0, 0
+			if w > 0 then
+				for k = 1, 180 do
+					local up, dn = (d + k) % 360, (d - k) % 360
+					if dens[up] >= HUE_POP_HI then dH[d] = k; popDist[d] = k break end
+					if dens[dn] >= HUE_POP_HI then dH[d] = -k; popDist[d] = k break end
+				end
+				if popDist[d] == 0 then popW[d] = 0 end
+			end
+			for z = 1, 3 do capTab[z][d] = sample(doc.hue["cap" .. z], d + 0.5) end
+		end
+		-- dominant hue of each hue's neighbourhood: hill-climb on a smoothed density
+		local sd = {}
+		for d = 0, 359 do
+			local acc, wsum = 0, 0
+			for k = -15, 15 do
+				local wk = 16 - math.abs(k)
+				acc = acc + dens[(d + k) % 360] * wk
+				wsum = wsum + wk
+			end
+			sd[d] = acc / wsum
+		end
+		local gatherDH, gatherOK = {}, {}
+		for d = 0, 359 do
+			local cur = d
+			for _ = 1, 120 do
+				local up, dn = (cur + 1) % 360, (cur - 1) % 360
+				if sd[up] > sd[cur] and sd[up] >= sd[dn] then cur = up
+				elseif sd[dn] > sd[cur] then cur = dn
+				else break end
+			end
+			local dh = ((cur - d + 540) % 360) - 180
+			gatherDH[d] = dh
+			gatherOK[d] = sd[cur] >= HUE_POP_HI
+		end
+		m.hue = { popW = popW, dH = dH, popDist = popDist, cap = capTab, gDH = gatherDH, gOK = gatherOK }
+	end
+
+	print(string.format(TAG .. "profile v%s \"%s\", %d bands, %d palette colours",
+		tostring(doc.version), tostring(m.name), bins, #m.palette))
+
+	cachedPath, cachedRaw, cachedModel = path, raw, m
+	return m
+end
+
+---------------------------------------------------------------------------
+-- process
+---------------------------------------------------------------------------
+
+local function do_process(req)
+	local src = InImage:GetValue(req)
+	if not src then return end
+
+	local path = resolve_path(InPath:GetValue(req).Value)
+	local model, err = load_profile(path)
+	if not model then
+		print(TAG .. tostring(err))
+		OutImage:Set(req, src)
+		return
+	end
+
+	local bins = model.bins
+	local strength = clampf(InStrength:GetValue(req).Value, 0, 1)
+	if strength <= 0 then OutImage:Set(req, src); return end
+
+	local premul = InAlpha:GetValue(req).Value > 0.5
+	local palHold = InPalHold:GetValue(req).Value
+	local palSnap = InPalSnap:GetValue(req).Value
+	local hueTol = InHueTol:GetValue(req).Value
+
+	local holds, snaps, entries = {}, {}, model.palette
+	for _, e in ipairs(entries) do
+		if e.mode == "hold" then holds[#holds + 1] = e else snaps[#snaps + 1] = e end
+	end
+
+	src:DownloadGPUMem(req)
+	local st = analyse(src, bins, InSamples:GetValue(req).Value, holds, premul)
+	if not st then OutImage:Set(req, src); return end
+
+	local colourAmt = clampf(InColour:GetValue(req).Value, 0, 1)
+	local toneAmt = clampf(InTone:GetValue(req).Value, 0, 1) * clampf(InToneMaster:GetValue(req).Value, 0, 1)
+	local gatherAmt = clampf(InHueGather:GetValue(req).Value, 0, 1) * colourAmt
+	local pullAmt = clampf(InHuePull:GetValue(req).Value, 0, 1) * colourAmt
+	local pullRange = InHueRange:GetValue(req).Value
+	local capAmt = clampf(InChromaLimit:GetValue(req).Value, 0, 1) * colourAmt
+	local colTol = math.max(0.01, InColTol:GetValue(req).Value / 100)
+	local limLift = clampf(InLimLift:GetValue(req).Value, 0, 1) * colourAmt
+	local hueT = model.hue
+	local toneMax = math.max(0.01, InToneMax:GetValue(req).Value)
+	local castAmt = clampf(InCast:GetValue(req).Value, 0, 1) * colourAmt
+	local skinAmt = clampf(InSkin:GetValue(req).Value, 0, 1)
+	local preserveLum = InPreserve:GetValue(req).Value > 0.5
+	local matchSat = InSat:GetValue(req).Value > 0.5
+	local neutralAmt = clampf(InNeutral:GetValue(req).Value, 0, 1)
+	local protectSat = InProtect:GetValue(req).Value > 0.5
+	local clampOut = InClamp:GetValue(req).Value > 0.5
+	if preserveLum then toneAmt = 0 end
+
+	-- source band means of a/b: need enough samples to be trusted, gaps are
+	-- interpolated, then lightly smoothed across neighbouring bands
+	local totalCn, sumA, sumA2, sumB, sumB2 = 0, 0, 0, 0, 0
+	for i = 1, bins do
+		totalCn = totalCn + st.cn[i]
+		sumA = sumA + st.sA[i]; sumA2 = sumA2 + st.sA2[i]
+		sumB = sumB + st.sB[i]; sumB2 = sumB2 + st.sB2[i]
+	end
+	local gA = totalCn > 0 and sumA / totalCn or 0
+	local gB = totalCn > 0 and sumB / totalCn or 0
+	local gAs, gBs = 0, 0
+	if totalCn > 0 then
+		local va, vb = sumA2 / totalCn - gA * gA, sumB2 / totalCn - gB * gB
+		gAs = math.sqrt(va > 0 and va or 0)
+		gBs = math.sqrt(vb > 0 and vb or 0)
+	end
+
+	local minC = math.max(30, 0.002 * totalCn)
+	local ba, bb, okb, anyValid = {}, {}, {}, false
+	for i = 1, bins do
+		if st.cn[i] >= minC then
+			ba[i] = st.sA[i] / st.cn[i]
+			bb[i] = st.sB[i] / st.cn[i]
+			okb[i] = true
+			anyValid = true
+		end
+	end
+	local qsa, qsb = {}, {}
+	for i = 1, bins do
+		if not anyValid then
+			qsa[i], qsb[i] = gA, gB
+		elseif okb[i] then
+			qsa[i], qsb[i] = ba[i], bb[i]
+		else
+			local lo, hi
+			for j = i - 1, 1, -1 do if okb[j] then lo = j break end end
+			for j = i + 1, bins do if okb[j] then hi = j break end end
+			if lo and hi then
+				local f = (i - lo) / (hi - lo)
+				qsa[i] = ba[lo] * (1 - f) + ba[hi] * f
+				qsb[i] = bb[lo] * (1 - f) + bb[hi] * f
+			else
+				local k = lo or hi
+				qsa[i], qsb[i] = ba[k], bb[k]
+			end
+		end
+	end
+	do -- 1-2-1 smoothing across bands
+		local sa, sb = {}, {}
+		for i = 1, bins do
+			local l, r = (i > 1) and i - 1 or i, (i < bins) and i + 1 or i
+			sa[i] = 0.25 * qsa[l] + 0.5 * qsa[i] + 0.25 * qsa[r]
+			sb[i] = 0.25 * qsb[l] + 0.5 * qsb[i] + 0.25 * qsb[r]
+		end
+		qsa, qsb = sa, sb
+	end
+
+	local kA, kB = 1, 1
+	if matchSat then
+		if gAs > 0.004 and model.gsa > 0 then kA = clampf(math.sqrt(model.gsa / gAs), 0.6, 1.5) end
+		if gBs > 0.004 and model.gsb > 0 then kB = clampf(math.sqrt(model.gsb / gBs), 0.6, 1.5) end
+	end
+
+	kA = 1 + (kA - 1) * colourAmt
+	kB = 1 + (kB - 1) * colourAmt
+
+	-- tone
+	local srcP = {}
+	for i = 1, bins do srcP[i] = st.bc[i] end
+	local lut = build_tone_lut(srcP, model.p, bins)
+	local blackS, whiteS = st.black, st.white
+	local blackO = blackS + (model.black - blackS) * toneAmt
+	local whiteO = whiteS + (model.white - whiteS) * toneAmt
+	if whiteO - blackO < 0.05 then blackO, whiteO = blackS, whiteS end
+	local rngS = math.max(whiteS - blackS, 0.02)
+	local rngO = whiteO - blackO
+
+	local last = bins - 2
+	local function ipf(arr, i0, fr)
+		return arr[i0 + 1] * (1 - fr) + arr[i0 + 2] * fr
+	end
+
+	local dst = Image({ IMG_Like = src })
+	local px = Pixel()
+	local w, h = src.Width, src.Height
+	local nEnt = #entries
+
+	for y = 0, h - 1 do
+		for x = 0, w - 1 do
+			src:GetPixel(x, y, px)
+			local ax = px.A
+			if ax > 0 then
+				local fac = premul and ax or 1
+				local r0, g0, b0 = px.R / fac, px.G / fac, px.B / fac
+				local cr, cg, cb = clampf(r0, 0, 1), clampf(g0, 0, 1), clampf(b0, 0, 1)
+
+				local L, A, B = labf(cr, cg, cb)
+				local t = (L - blackS) / rngS
+				local tc = t
+				if tc < 0 then tc = 0 elseif tc > 1 then tc = 1 end
+
+				-- luminance
+				local tn = t
+				if toneAmt > 0 then
+					local xl = tc * (TONE_LUT - 1)
+					local il = math.floor(xl)
+					if il > TONE_LUT - 2 then il = TONE_LUT - 2 end
+					local fl = xl - il
+					local mapped = lut[il] * (1 - fl) + lut[il + 1] * fl + (t - tc)
+					local delta = mapped - t
+					delta = delta / (1 + math.abs(delta) / toneMax)   -- soft limit, |delta| < toneMax
+					tn = t + delta * toneAmt
+				end
+
+				-- chroma
+				local pos = tc * bins - 0.5
+				local i0 = math.floor(pos)
+				local fr = pos - i0
+				if i0 < 0 then i0 = 0; fr = 0 end
+				if i0 > last then i0 = last; fr = 1 end
+				local sa, sb = ipf(qsa, i0, fr), ipf(qsb, i0, fr)
+				local ta, tb = ipf(model.ta, i0, fr), ipf(model.tb, i0, fr)
+
+				local A2 = (A - sa) * kA + sa + (ta - sa) * castAmt
+				local B2 = (B - sb) * kB + sb + (tb - sb) * castAmt
+
+				local C = math.sqrt(A * A + B * B)
+				local ph = 0
+				if C > 0.0001 then
+					ph = math.deg(math.atan2(B, A))
+					if ph < 0 then ph = ph + 360 end
+				end
+
+				if neutralAmt > 0 then
+					local nf = 1 - neutralAmt * 0.03 / (C + 0.03)
+					A2 = A + (A2 - A) * nf
+					B2 = B + (B2 - B) * nf
+				end
+
+				if protectSat then
+					local wsat = (C - 0.10) / 0.12
+					if wsat > 0 then
+						if wsat > 1 then wsat = 1 end
+						A2 = A2 + (A - A2) * wsat
+						B2 = B2 + (B - B2) * wsat
+						tn = tn + (t - tn) * wsat
+					end
+				end
+
+				-- skin-like hues: bring chroma back toward the source
+				local wsk = 0
+				if skinAmt > 0 then
+					local ws = trap(ph, 12, 30, 65, 82) * trap(L, 0.2, 0.35, 0.88, 0.97) * trap(C, 0.04, 0.08, 0.36, 0.46)
+					if ws > 0 then
+						ws = ws * skinAmt
+						wsk = ws
+						A2 = A2 + (A - A2) * ws
+						B2 = B2 + (B - B2) * ws
+					end
+				end
+
+				-- palette: hold (restore source), then snap (rotate onto anchor hue)
+				local holdW = 0
+				if nEnt > 0 and C > 0.05 then
+					if palHold > 0 then
+						local wh = 0
+						for k = 1, nEnt do
+							local ek = entries[k]
+							local wk
+							if ek.mode == "hold" then
+								wk = entry_weight(ek, C, ph, hueTol)
+							else
+								wk = anchor_weight(ek, L, A, B, colTol)
+							end
+							if wk > wh then wh = wk end
+						end
+						holdW = wh * palHold
+						if wh > 0 then
+							wh = wh * palHold
+							A2 = A2 + (A - A2) * wh
+							B2 = B2 + (B - B2) * wh
+							tn = tn + (t - tn) * wh
+						end
+					end
+					if palSnap > 0 and #snaps > 0 then
+						local best, besth = 0, nil
+						for k = 1, #snaps do
+							local pk = snaps[k]
+							local wk = entry_weight(pk, C, ph, hueTol)
+							if wk > 0 then
+								local lg = 1 - math.abs(L - pk.L) / 0.35
+								if lg < 0 then lg = 0 elseif lg > 1 then lg = 1 end
+								wk = wk * lg
+								if wk > best then best = wk; besth = pk.h end
+							end
+						end
+						if besth then
+							local ws2 = best * palSnap
+							local C2 = math.sqrt(A2 * A2 + B2 * B2)
+							if C2 > 0.0001 then
+								local tr = math.rad(besth)
+								A2 = A2 + (C2 * math.cos(tr) - A2) * ws2
+								B2 = B2 + (C2 * math.sin(tr) - B2) * ws2
+							end
+						end
+					end
+				end
+
+				-- hue gamut: pull absent hues toward the style, limit chroma per hue
+				if hueT and (pullAmt > 0 or capAmt > 0 or gatherAmt > 0) then
+					local C2 = math.sqrt(A2 * A2 + B2 * B2)
+					if C2 > 0.03 then
+						local h2 = math.deg(math.atan2(B2, A2))
+						if h2 < 0 then h2 = h2 + 360 end
+						local free = 1 - holdW
+						if pullAmt > 0 and C2 > 0.04 then
+							local idx = math.floor(h2) % 360
+							local wp = hueT.popW[idx]
+							if wp > 0 and hueT.popDist[idx] <= pullRange then
+								local g = (C2 - 0.04) / 0.08
+								if g > 1 then g = 1 end
+								h2 = h2 + hueT.dH[idx] * wp * pullAmt * g * free
+								local tr = math.rad(h2)
+								A2, B2 = C2 * math.cos(tr), C2 * math.sin(tr)
+							end
+						end
+						if gatherAmt > 0 and C2 > 0.04 then
+							local idx = math.floor(h2) % 360
+							local dh = hueT.gDH[idx]
+							if hueT.gOK[idx] and math.abs(dh) <= pullRange then
+								local g = (C2 - 0.04) / 0.08
+								if g > 1 then g = 1 end
+								h2 = h2 + dh * gatherAmt * g * free * (1 - wsk)
+								local tr = math.rad(h2)
+								A2, B2 = C2 * math.cos(tr), C2 * math.sin(tr)
+							end
+						end
+						if capAmt > 0 then
+							local idx = math.floor(h2) % 360
+							local Lz = blackO + tn * rngO
+							local cap
+							if Lz <= 0.2 then cap = hueT.cap[1][idx]
+							elseif Lz <= 0.55 then
+								local f = (Lz - 0.2) / 0.35
+								cap = hueT.cap[1][idx] * (1 - f) + hueT.cap[2][idx] * f
+							elseif Lz <= 0.85 then
+								local f = (Lz - 0.55) / 0.3
+								cap = hueT.cap[2][idx] * (1 - f) + hueT.cap[3][idx] * f
+							else cap = hueT.cap[3][idx] end
+							if C2 > cap then
+								local k = capAmt * free * (1 - wsk)
+								local C3 = C2 - (C2 - cap) * k
+								local sc = C3 / C2
+								A2, B2 = A2 * sc, B2 * sc
+								-- desaturating toward white, not toward grey: lighter tones get lighter
+								if limLift > 0 then
+									local rl = (Lz - 0.45) / 0.2
+									if rl > 0 then
+										if rl > 1 then rl = 1 end
+										tn = tn + limLift * (C2 - C3) * rl / rngO
+									end
+								end
+							end
+						end
+					end
+				end
+
+				if strength < 1 then
+					tn = t + (tn - t) * strength
+					A2 = A + (A2 - A) * strength
+					B2 = B + (B2 - B) * strength
+				end
+
+				local Lout = blackO + tn * rngO
+				local nr, ng, nb = rgbf(Lout, A2, B2)
+
+				if clampOut then
+					nr = clampf(nr, 0, 1)
+					ng = clampf(ng, 0, 1)
+					nb = clampf(nb, 0, 1)
+				end
+
+				px.R = (r0 - cr + nr) * fac
+				px.G = (g0 - cg + ng) * fac
+				px.B = (b0 - cb + nb) * fac
+			end
+			dst:SetPixel(x, y, px)
+		end
+	end
+
+	OutImage:Set(req, dst)
+end
+
+function Process(req)
+	local ok, err = pcall(do_process, req)
+	if not ok then
+		print(TAG .. tostring(err))
+		local src = InImage:GetValue(req)
+		OutImage:Set(req, src)
+	end
+end

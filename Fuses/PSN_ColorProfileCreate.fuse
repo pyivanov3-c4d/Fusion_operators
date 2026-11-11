@@ -1,0 +1,985 @@
+-- PSN_ColorProfileCreate.fuse   (profile format v4)
+-- Builds a reusable, brand-neutral colour-style profile (*.psncol.json) from N
+-- finished reference images. Companion operator: PSN_ColorProfileMatch.
+--
+-- Nothing in this file is tied to one brand. A "style" is data:
+--   * per-luminance-band chroma statistics (CIELab a/b mean + global spread)
+--   * the tonal distribution (how much of the pool sits in each luminance band)
+--   * the tonal range (black / white points)
+--   * an optional palette: anchor colours (snap) and accent colours (hold)
+-- The matcher reads all of that from the file.
+
+FuRegisterClass("PSN_ColorProfileCreate", CT_Tool, {
+	REGS_Name = "PSN_ColorProfileCreate",
+	REGS_Category = "PSN\\Color",
+	REGS_OpIconString = "PCP",
+	REGS_OpDescription = "Build a colour-style profile (*.psncol.json) from reference images",
+	REG_NoMotionBlurCtrls = true,
+	REG_NoBlendCtrls = true,
+	REG_NoObjMatCtrls = true,
+	REG_OpNoMask = true,
+	REG_Fuse_NoEdit = false,
+	REG_Fuse_NoReload = false,
+})
+
+local NREFS = 16
+local MAX_SAMPLES = 120000
+local HOLD_TOL = 30          -- degrees, used to keep accent colours out of the statistics
+local PROFILE_VERSION = 4
+local TAG = "PSN_ColorProfileCreate: "
+
+local cacheKeys = {}
+local forceBuilds = {}
+
+---------------------------------------------------------------------------
+-- colour math (sRGB -> CIELab D65, L/100, a/100, b/100)
+---------------------------------------------------------------------------
+
+local SRGB_N = 1024
+local srgb_dec = {}
+for i = 0, SRGB_N do
+	local t = i / SRGB_N
+	srgb_dec[i] = (t <= 0.04045) and (t / 12.92) or (((t + 0.055) / 1.055) ^ 2.4)
+end
+
+local function to_lin(v)
+	if v <= 0 then return 0 end
+	if v >= 1 then return 1 end
+	local x = v * SRGB_N
+	local i = math.floor(x)
+	return srgb_dec[i] * (1 - (x - i)) + srgb_dec[i + 1] * (x - i)
+end
+
+local XN, YN, ZN = 0.95047, 1.0, 1.08883
+
+local function f_lab(t)
+	if t > 0.008856451679 then return t ^ (1 / 3) end
+	return 7.787037037 * t + 16 / 116
+end
+
+local function lab_from_rgb(r, g, b)
+	r = to_lin(r); g = to_lin(g); b = to_lin(b)
+	local x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / XN
+	local y = (0.2126729 * r + 0.7151522 * g + 0.0721750 * b)
+	local z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / ZN
+	local fx, fy, fz = f_lab(x), f_lab(y), f_lab(z)
+	return (116 * fy - 16) / 100, 5 * (fx - fy), 2 * (fy - fz)
+end
+
+local function clamp(v, lo, hi)
+	if v < lo then return lo end
+	if v > hi then return hi end
+	return v
+end
+
+local function esc(s)
+	s = tostring(s or "")
+	s = s:gsub("\\", "\\\\")
+	s = s:gsub('"', '\\"')
+	s = s:gsub("[\r\n\t]", " ")
+	return s
+end
+
+local function f6(v) return string.format("%.6f", v or 0) end
+
+local function percentile(hist, total, p)
+	if total <= 0 then return 0.0 end
+	local target = total * p
+	local acc = 0
+	for i = 1, 256 do
+		acc = acc + hist[i]
+		if acc >= target then return (i - 1) / 255 end
+	end
+	return 1.0
+end
+
+---------------------------------------------------------------------------
+-- palette entries. entry = { hex, L, a, b, mode = "snap" | "hold" }
+-- "snap": brand/anchor colour - matched content near its hue is rotated onto it.
+-- "hold": accent colour - content near it is never restyled, and it is kept out
+--         of the profile statistics so a small accent cannot skew them.
+---------------------------------------------------------------------------
+
+local function entry_geometry(p)
+	p.h = math.deg(math.atan2(p.b, p.a))
+	if p.h < 0 then p.h = p.h + 360 end
+	p.c = math.sqrt(p.a * p.a + p.b * p.b)
+end
+
+-- 0..1 : how strongly pixel (A,B,C,ph) belongs to palette entry p
+local function entry_weight(p, C, ph, tol)
+	if C < 0.05 or p.c < 0.03 then return 0 end
+	local d = math.abs(ph - p.h)
+	if d > 180 then d = 360 - d end
+	if d >= tol then return 0 end
+	local w = 1 - (d / tol) ^ 2
+	local lo, hi = 0.25 * p.c, 0.5 * p.c
+	local g = (C - lo) / (hi - lo)
+	if g <= 0 then return 0 end
+	if g > 1 then g = 1 end
+	return w * g
+end
+
+local function parse_hex_list(s, mode)
+	local out = {}
+	for hx in tostring(s or ""):gmatch("#?(%x%x%x%x%x%x)") do
+		local r = tonumber(hx:sub(1, 2), 16) / 255
+		local g = tonumber(hx:sub(3, 4), 16) / 255
+		local b = tonumber(hx:sub(5, 6), 16) / 255
+		local L, A, B = lab_from_rgb(r, g, b)
+		if math.sqrt(A * A + B * B) < 0.03 then
+			print(TAG .. "#" .. hx:upper() .. " is neutral - neutrals are handled by Keep Neutrals, skipped")
+		else
+			local e = { hex = "#" .. hx:upper(), L = L, a = A, b = B, mode = mode }
+			entry_geometry(e)
+			out[#out + 1] = e
+		end
+	end
+	return out
+end
+
+-- distinct chromatic colours of a swatch image (flat swatches, any brand)
+local function extract_palette(img)
+	local w, h = img.Width, img.Height
+	if not w or w < 1 or h < 1 then return {} end
+	local stride = math.max(1, math.floor(math.sqrt((w * h) / 40000)))
+	local cells, px = {}, Pixel()
+	local nChrom = 0
+	local y = 0
+	while y < h do
+		local x = 0
+		while x < w do
+			img:GetPixel(x, y, px)
+			local a = px.A
+			if a >= 0.5 then
+				local fac = (a < 0.999) and a or 1
+				local L, A, B = lab_from_rgb(px.R / fac, px.G / fac, px.B / fac)
+				if math.sqrt(A * A + B * B) > 0.05 then
+					local key = math.floor(L / 0.1) * 1000000 + math.floor((A + 1.5) / 0.08) * 1000 + math.floor((B + 1.5) / 0.08)
+					local c = cells[key]
+					if not c then c = { n = 0, sL = 0, sA = 0, sB = 0 }; cells[key] = c end
+					c.n = c.n + 1; c.sL = c.sL + L; c.sA = c.sA + A; c.sB = c.sB + B
+					nChrom = nChrom + 1
+				end
+			end
+			x = x + stride
+		end
+		y = y + stride
+	end
+	if nChrom == 0 then return {} end
+	local list = {}
+	local minN = math.max(8, 0.01 * nChrom)
+	for _, c in pairs(cells) do
+		if c.n >= minN then list[#list + 1] = c end
+	end
+	table.sort(list, function(p, q) return p.n > q.n end)
+	local merged = {}
+	for _, c in ipairs(list) do
+		local mL, mA, mB = c.sL / c.n, c.sA / c.n, c.sB / c.n
+		local hit
+		for _, m in ipairs(merged) do
+			local dL, dA, dB = mL - m.sL / m.n, mA - m.sA / m.n, mB - m.sB / m.n
+			if math.sqrt(dL * dL + dA * dA + dB * dB) < 0.09 then hit = m break end
+		end
+		if hit then
+			hit.n = hit.n + c.n; hit.sL = hit.sL + c.sL; hit.sA = hit.sA + c.sA; hit.sB = hit.sB + c.sB
+		else
+			merged[#merged + 1] = { n = c.n, sL = c.sL, sA = c.sA, sB = c.sB }
+		end
+		if #merged >= 12 then break end
+	end
+	local out = {}
+	for _, m in ipairs(merged) do
+		local e = { L = m.sL / m.n, a = m.sA / m.n, b = m.sB / m.n, mode = "snap" }
+		entry_geometry(e)
+		out[#out + 1] = e
+	end
+	return out
+end
+
+local function merge_palettes(...)
+	local out = {}
+	for _, list in ipairs({ ... }) do
+		for _, e in ipairs(list) do
+			local dup = false
+			for _, o in ipairs(out) do
+				local dL, dA, dB = e.L - o.L, e.a - o.a, e.b - o.b
+				if math.sqrt(dL * dL + dA * dA + dB * dB) < 0.06 then
+					dup = true
+					if e.mode == "hold" then o.mode = "hold" end -- accent wins
+					break
+				end
+			end
+			if not dup then out[#out + 1] = e end
+		end
+	end
+	return out
+end
+
+---------------------------------------------------------------------------
+-- UI
+---------------------------------------------------------------------------
+
+local function addRef(i)
+	self:AddInput("Ref " .. i, "Ref" .. i, {
+		LINKID_DataType = "Image",
+		INPID_InputControl = "ImageControl",
+		ICS_ControlPage = "Controls",
+		LINK_Main = i,
+		INP_Required = false,
+	})
+	self:AddInput("Weight " .. i, "Weight" .. i, {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ScrewControl",
+		ICS_ControlPage = "Controls",
+		INP_Default = 1,
+		INP_MinScale = 0,
+		INP_MaxScale = 4,
+		INP_MinAllowed = 0,
+		INP_MaxAllowed = 100,
+		INPS_StatusText = "Relative weight of reference " .. i .. ". Every reference counts equally at weight 1, whatever its size. 0 disables it.",
+	})
+end
+
+function Create()
+	InPalette = self:AddInput("Palette Image", "ProtectPalette", {
+		LINKID_DataType = "Image",
+		INPID_InputControl = "ImageControl",
+		LINK_Main = NREFS + 1,
+		INP_Required = false,
+		INPS_StatusText = "Optional image of flat colour swatches (a brand palette). Distinct chromatic colours are read from it as anchor colours.",
+	})
+
+	for i = 1, NREFS do addRef(i) end
+
+	self:BeginControlNest("Style", "StyleNest", true, {})
+	InName = self:AddInput("Profile Name", "ProfileName", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		TEC_Lines = 1,
+		INPS_StatusText = "Free text stored in the profile, e.g. the brand or campaign name.",
+	})
+	InHex = self:AddInput("Anchor Colours (hex)", "PaletteHex", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		TEC_Lines = 2,
+		INPS_StatusText = "Brand colours as hex, e.g. #0E1B48 #3A5099. Content near these hues is rotated onto them by the matcher. Neutrals are ignored.",
+	})
+	InAccent = self:AddInput("Accent Colours (hex)", "AccentHex", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "TextEditControl",
+		TEC_Lines = 1,
+		INPS_StatusText = "Accent colours as hex, e.g. #FF0032. They are never restyled by the matcher and are kept out of the statistics.",
+	})
+	self:EndControlNest()
+
+	self:BeginControlNest("References", "RefsNest", false, {})
+	InBins = self:AddInput("Luma Bands", "Bins", {
+		LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+		INP_Default = 16, INP_Integer = true,
+		INP_MinScale = 8, INP_MaxScale = 32,
+		INP_MinAllowed = 4, INP_MaxAllowed = 64, IC_Steps = 1,
+		INPS_StatusText = "Number of luminance bands. More bands = tighter conditioning, but each band needs enough pixels.",
+	})
+	InMinPix = self:AddInput("Min Pixels per Band", "MinPix", {
+		LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+		INP_Default = 512, INP_Integer = true,
+		INP_MinScale = 0, INP_MaxScale = 20000,
+		INP_MinAllowed = 0, INP_MaxAllowed = 100000000,
+		INPS_StatusText = "Bands with fewer chromatic samples are interpolated from their neighbours instead of trusted.",
+	})
+	InFrame = self:AddInput("Sample Frame", "SampleFrame", {
+		LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+		INP_Default = 0, INP_Integer = true,
+		INP_MinScale = -100, INP_MaxScale = 1000,
+		INPS_StatusText = "Frame taken from animated references (and from the pass-through output).",
+	})
+	InSpace = self:AddInput("Reference Encoding", "RefSpace", {
+		LINKID_DataType = "Number", INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		{ CCS_AddString = "sRGB (gamma encoded)" },
+		INPS_StatusText = "Working space assumed for the references. The matcher uses the same assumption.",
+	})
+	self:EndControlNest()
+
+	InPath = self:AddInput("Profile File", "ProfileFile", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "FileControl",
+		INPS_StatusText = "Where the profile is written. Empty = colorprofiles/profile.psncol.json next to the comp. Comp: and other path aliases work.",
+	})
+
+	InAuto = self:AddInput("Auto Rebuild", "AutoBuild", {
+		LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl",
+		INP_Default = 0, INP_Integer = true,
+		INPS_StatusText = "Off (default): the file is only written when Build Profile is pressed. On: it is also rewritten when settings or the reference set change.",
+	})
+
+	InBuild = self:AddInput("Build Profile", "BuildProfile", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ButtonControl",
+		INP_DoNotifyChanged = true,
+	})
+
+	OutImage = self:AddOutput("Output", "Output", {
+		LINKID_DataType = "Image",
+		LINK_Main = 1,
+	})
+end
+
+function NotifyChanged(inp, param, time)
+	if inp == InBuild then
+		forceBuilds[self.Name] = true
+		cacheKeys[self.Name] = nil
+	end
+end
+
+---------------------------------------------------------------------------
+-- paths
+---------------------------------------------------------------------------
+
+local function map_path(p)
+	local comps = {}
+	local ok1, c1 = pcall(function() return self.Comp end)
+	if ok1 and c1 then comps[#comps + 1] = c1 end
+	local ok2, c2 = pcall(function() return comp end)
+	if ok2 and c2 then comps[#comps + 1] = c2 end
+	for _, c in ipairs(comps) do
+		local ok, m = pcall(function() return c:MapPath(p) end)
+		if ok and type(m) == "string" and m ~= "" and not m:match("^Comp:") then return m end
+	end
+	return p
+end
+
+local function resolve_path(raw)
+	local p = tostring(raw or "")
+	p = p:gsub('"', ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if p == "" then p = "Comp:colorprofiles\\profile.psncol.json" end
+	p = map_path(p)
+	if p:match("^Comp:") then p = "profile.psncol.json" end
+	return p
+end
+
+---------------------------------------------------------------------------
+-- analysis of one reference
+---------------------------------------------------------------------------
+
+local function excluded(L, A, B, holds)
+	if #holds == 0 then return false end
+	local C = math.sqrt(A * A + B * B)
+	if C < 0.05 then return false end
+	local ph = math.deg(math.atan2(B, A))
+	if ph < 0 then ph = ph + 360 end
+	for i = 1, #holds do
+		if entry_weight(holds[i], C, ph, HOLD_TOL) > 0.5 then return true end
+	end
+	return false
+end
+
+local function analyse(img, bins, maxSamples, holds)
+	local w, h = img.Width, img.Height
+	if not w or w < 1 or h < 1 then return nil end
+	local stride = math.max(1, math.floor(math.sqrt((w * h) / (maxSamples or MAX_SAMPLES))))
+
+	local hist = {}
+	for i = 1, 256 do hist[i] = 0 end
+	local total = 0
+	local px = Pixel()
+	local y = 0
+	while y < h do
+		local x = 0
+		while x < w do
+			img:GetPixel(x, y, px)
+			local a = px.A
+			if a >= 0.5 then
+				local fac = (a < 0.999) and a or 1
+				local L = (lab_from_rgb(px.R / fac, px.G / fac, px.B / fac))
+				local idx = math.floor(L * 255) + 1
+				if idx < 1 then idx = 1 elseif idx > 256 then idx = 256 end
+				hist[idx] = hist[idx] + 1
+				total = total + 1
+			end
+			x = x + stride
+		end
+		y = y + stride
+	end
+	if total < 64 then return nil end
+
+	local black = percentile(hist, total, 0.005)
+	local white = percentile(hist, total, 0.995)
+	if white - black < 0.02 then black, white = 0.0, 1.0 end
+	local rng = white - black
+
+	local res = {
+		n = total, black = black, white = white,
+		bc = {}, cn = {}, sL = {}, sL2 = {}, sA = {}, sA2 = {}, sB = {}, sB2 = {},
+	}
+	for i = 1, bins do
+		res.bc[i], res.cn[i], res.sL[i], res.sL2[i] = 0, 0, 0, 0
+		res.sA[i], res.sA2[i], res.sB[i], res.sB2[i] = 0, 0, 0, 0
+	end
+
+	y = 0
+	while y < h do
+		local x = 0
+		while x < w do
+			img:GetPixel(x, y, px)
+			local a = px.A
+			if a >= 0.5 then
+				local fac = (a < 0.999) and a or 1
+				local L, A, B = lab_from_rgb(px.R / fac, px.G / fac, px.B / fac)
+				local t = clamp((L - black) / rng, 0, 1)
+				local bi = math.floor(t * bins)
+				if bi > bins - 1 then bi = bins - 1 end
+				bi = bi + 1
+				res.bc[bi] = res.bc[bi] + 1
+				res.sL[bi] = res.sL[bi] + t
+				res.sL2[bi] = res.sL2[bi] + t * t
+				if not excluded(L, A, B, holds) then
+					res.cn[bi] = res.cn[bi] + 1
+					res.sA[bi] = res.sA[bi] + A
+					res.sA2[bi] = res.sA2[bi] + A * A
+					res.sB[bi] = res.sB[bi] + B
+					res.sB2[bi] = res.sB2[bi] + B * B
+				end
+			end
+			x = x + stride
+		end
+		y = y + stride
+	end
+	return res
+end
+
+---------------------------------------------------------------------------
+-- pooling: every reference contributes `weight` of mass in total, so a large
+-- image cannot outvote a small one.
+---------------------------------------------------------------------------
+
+local function new_pool(bins)
+	local p = { wsum = 0, black = 0, white = 0, nraw = 0, bc = {}, cn = {}, rawcn = {},
+		sL = {}, sL2 = {}, sA = {}, sA2 = {}, sB = {}, sB2 = {} }
+	for i = 1, bins do
+		p.bc[i], p.cn[i], p.rawcn[i] = 0, 0, 0
+		p.sL[i], p.sL2[i], p.sA[i], p.sA2[i], p.sB[i], p.sB2[i] = 0, 0, 0, 0, 0, 0
+	end
+	return p
+end
+
+local function pool_add(pool, res, w, bins)
+	local f = w / res.n
+	pool.wsum = pool.wsum + w
+	pool.black = pool.black + res.black * w
+	pool.white = pool.white + res.white * w
+	pool.nraw = pool.nraw + res.n
+	for i = 1, bins do
+		local nChrom = res.cn[i]
+		pool.bc[i] = pool.bc[i] + res.bc[i] * f
+		pool.rawcn[i] = pool.rawcn[i] + nChrom
+		pool.sL[i] = pool.sL[i] + res.sL[i] * f
+		pool.sL2[i] = pool.sL2[i] + res.sL2[i] * f
+		-- chroma sums are normalised by the reference's own pixel count too
+		pool.cn[i] = pool.cn[i] + nChrom * f
+		pool.sA[i] = pool.sA[i] + res.sA[i] * f
+		pool.sA2[i] = pool.sA2[i] + res.sA2[i] * f
+		pool.sB[i] = pool.sB[i] + res.sB[i] * f
+		pool.sB2[i] = pool.sB2[i] + res.sB2[i] * f
+	end
+end
+
+local function mean_std(s, s2, n)
+	if n <= 0 then return 0, 0 end
+	local m = s / n
+	local v = s2 / n - m * m
+	return m, math.sqrt(v > 0 and v or 0)
+end
+
+local function finalize(pool, bins, minBin)
+	local mass = 0
+	for i = 1, bins do mass = mass + pool.bc[i] end
+
+	local tCn, tA, tA2, tB, tB2, tL, tL2 = 0, 0, 0, 0, 0, 0, 0
+	for i = 1, bins do
+		tCn = tCn + pool.cn[i]
+		tA = tA + pool.sA[i]; tA2 = tA2 + pool.sA2[i]
+		tB = tB + pool.sB[i]; tB2 = tB2 + pool.sB2[i]
+		tL = tL + pool.sL[i]; tL2 = tL2 + pool.sL2[i]
+	end
+	local gAm, gAs = mean_std(tA, tA2, tCn)
+	local gBm, gBs = mean_std(tB, tB2, tCn)
+	local gLm, gLs = mean_std(tL, tL2, mass)
+
+	local out = { p = {}, nraw = {}, Lm = {}, Ls = {}, Am = {}, As = {}, Bm = {}, Bs = {} }
+	local valid, anyValid = {}, false
+	for i = 1, bins do
+		out.p[i] = (mass > 0) and (pool.bc[i] / mass) or (1 / bins)
+		out.nraw[i] = pool.rawcn[i]
+		out.Lm[i], out.Ls[i] = mean_std(pool.sL[i], pool.sL2[i], pool.bc[i])
+		if pool.rawcn[i] >= minBin and pool.cn[i] > 0 then
+			out.Am[i], out.As[i] = mean_std(pool.sA[i], pool.sA2[i], pool.cn[i])
+			out.Bm[i], out.Bs[i] = mean_std(pool.sB[i], pool.sB2[i], pool.cn[i])
+			valid[i] = true
+			anyValid = true
+		else
+			valid[i] = false
+		end
+		if pool.bc[i] <= 0 then out.Lm[i] = (i - 0.5) / bins end
+	end
+	if not anyValid then
+		for i = 1, bins do
+			out.Am[i], out.As[i], out.Bm[i], out.Bs[i] = gAm, gAs, gBm, gBs
+			valid[i] = true
+		end
+	end
+
+	local function fill(arr)
+		for i = 1, bins do
+			if not valid[i] then
+				local lo, hi
+				for j = i - 1, 1, -1 do if valid[j] then lo = j break end end
+				for j = i + 1, bins do if valid[j] then hi = j break end end
+				if lo and hi then
+					local f = (i - lo) / (hi - lo)
+					arr[i] = arr[lo] * (1 - f) + arr[hi] * f
+				elseif lo then arr[i] = arr[lo]
+				elseif hi then arr[i] = arr[hi]
+				else arr[i] = 0 end
+			end
+		end
+	end
+	-- interpolate from the original valid values: work on copies so filled
+	-- bands do not feed each other
+	local function filled(arr)
+		local c = {}
+		for i = 1, bins do c[i] = arr[i] or 0 end
+		fill(c)
+		return c
+	end
+	out.Am, out.As, out.Bm, out.Bs = filled(out.Am), filled(out.As), filled(out.Bm), filled(out.Bs)
+
+	out.glob = { gLm, gLs, gAm, gAs, gBm, gBs }
+	return out
+end
+
+---------------------------------------------------------------------------
+-- preview png: luminance ramp + band swatches + palette strip
+---------------------------------------------------------------------------
+
+local CRC_T = nil
+
+local function crc32(s)
+	if not bit then return 0 end
+	if not CRC_T then
+		local t = {}
+		for n = 0, 255 do
+			local c = n
+			for _ = 1, 8 do
+				if bit.band(c, 1) == 1 then c = bit.bxor(0xEDB88320, bit.rshift(c, 1))
+				else c = bit.rshift(c, 1) end
+			end
+			t[n] = c
+		end
+		CRC_T = t
+	end
+	local c = 0xFFFFFFFF
+	for i = 1, #s do
+		c = bit.bxor(CRC_T[bit.band(bit.bxor(c, s:byte(i)), 0xFF)], bit.rshift(c, 8))
+	end
+	return bit.bxor(c, 0xFFFFFFFF)
+end
+
+local function u32(v)
+	return string.char(
+		bit.band(bit.rshift(v, 24), 0xFF), bit.band(bit.rshift(v, 16), 0xFF),
+		bit.band(bit.rshift(v, 8), 0xFF), bit.band(v, 0xFF))
+end
+
+local function chunk(typ, data)
+	local body = typ .. data
+	return u32(#data) .. body .. u32(crc32(body))
+end
+
+local function adler32(s)
+	local a, b = 1, 0
+	for i = 1, #s do
+		a = (a + s:byte(i)) % 65521
+		b = (b + a) % 65521
+	end
+	return b * 65536 + a
+end
+
+local function zlib_store(raw)
+	local out = { string.char(0x78, 0x01) }
+	local pos, n = 1, #raw
+	while pos <= n do
+		local len = math.min(65535, n - pos + 1)
+		local last = (pos + len - 1 >= n) and 1 or 0
+		local nl = 65535 - len
+		out[#out + 1] = string.char(last, len % 256, math.floor(len / 256), nl % 256, math.floor(nl / 256))
+		out[#out + 1] = raw:sub(pos, pos + len - 1)
+		pos = pos + len
+	end
+	out[#out + 1] = u32(adler32(raw))
+	return table.concat(out)
+end
+
+local function enc8(v)
+	local s
+	if v <= 0 then s = 0
+	elseif v >= 1 then s = 1
+	elseif v <= 0.0031308 then s = v * 12.92
+	else s = 1.055 * (v ^ (1 / 2.4)) - 0.055 end
+	local r = math.floor(s * 255 + 0.5)
+	if r < 0 then return 0 elseif r > 255 then return 255 end
+	return r
+end
+
+-- inverse of f_lab, including its linear segment near black (the plain cube
+-- lifts dark colours: pure black came back as ~9/255 grey)
+local function finv(f)
+	local c = f * f * f
+	if c > 0.008856451679 then return c end
+	return (f - 16 / 116) / 7.787037037
+end
+
+local function rgb255(L, A, B)
+	local fy = (L * 100 + 16) / 116
+	local fx = fy + A * 100 / 500
+	local fz = fy - B * 100 / 200
+	local x = finv(fx) * XN
+	local y = finv(fy)
+	local z = finv(fz) * ZN
+	local r = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
+	local g = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
+	local b = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
+	return enc8(r), enc8(g), enc8(b)
+end
+
+local function band_ab(bins, mA, mB, u)
+	local p = u * bins - 0.5
+	local i0 = math.floor(p)
+	local f = p - i0
+	if i0 < 0 then i0 = 0 f = 0 end
+	if i0 > bins - 2 then i0 = bins - 2 f = 1 end
+	return mA[i0 + 1] * (1 - f) + mA[i0 + 2] * f, mB[i0 + 1] * (1 - f) + mB[i0 + 2] * f
+end
+
+local function write_preview(path, model, bins, palette)
+	if not bit then return false, "lua bit library unavailable" end
+	if bins < 2 then return false, "need at least two bands" end
+	local W, rampH, swH, palH = 1024, 64, 32, 24
+
+	local ramp = {}
+	for x = 0, W - 1 do
+		local u = x / (W - 1)
+		local a, b = band_ab(bins, model.Am, model.Bm, u)
+		local r, g, bb = rgb255(u, a, b)
+		ramp[#ramp + 1] = string.char(r, g, bb)
+	end
+	local rampRow = "\0" .. table.concat(ramp)
+
+	local sw, seg = {}, W / bins
+	for i = 0, bins - 1 do
+		local r, g, bb = rgb255((i + 0.5) / bins, model.Am[i + 1], model.Bm[i + 1])
+		local px = string.char(r, g, bb)
+		for _ = math.floor(i * seg + 0.5), math.floor((i + 1) * seg + 0.5) - 1 do sw[#sw + 1] = px end
+	end
+	while #sw < W do sw[#sw + 1] = sw[#sw] or string.char(0, 0, 0) end
+	local swRow = "\0" .. table.concat(sw, "", 1, W)
+
+	local rows = string.rep(rampRow, rampH) .. string.rep(swRow, swH)
+	local height = rampH + swH
+	if #palette > 0 then
+		local pr, pseg = {}, W / #palette
+		for i = 1, #palette do
+			local r, g, bb = rgb255(palette[i].L, palette[i].a, palette[i].b)
+			local px = string.char(r, g, bb)
+			for _ = math.floor((i - 1) * pseg + 0.5), math.floor(i * pseg + 0.5) - 1 do pr[#pr + 1] = px end
+		end
+		while #pr < W do pr[#pr + 1] = pr[#pr] end
+		rows = rows .. string.rep("\0" .. table.concat(pr, "", 1, W), palH)
+		height = height + palH
+	end
+
+	local png = string.char(137, 80, 78, 71, 13, 10, 26, 10)
+		.. chunk("IHDR", u32(W) .. u32(height) .. string.char(8, 2, 0, 0, 0))
+		.. chunk("IDAT", zlib_store(rows))
+		.. chunk("IEND", "")
+	local f = io.open(path, "wb")
+	if not f then return false, "cannot open " .. path end
+	f:write(png)
+	f:close()
+	return true
+end
+
+---------------------------------------------------------------------------
+-- profile file (v4). Written to a temp file first, then swapped in.
+---------------------------------------------------------------------------
+
+local function read_file(path)
+	local fh = io.open(path, "r")
+	if not fh then return nil end
+	local raw = fh:read("*a")
+	fh:close()
+	return raw
+end
+
+local function previous_ref_count(path)
+	local raw = read_file(path)
+	if not raw then return 0 end
+	local n = 0
+	for _ in raw:gmatch('"tool"%s*:') do n = n + 1 end
+	return n
+end
+
+-- palette already stored in the file being replaced (v4 "palette" or v3 "protect")
+local function previous_palette(path)
+	local raw = read_file(path)
+	if not raw then return nil end
+	local out = {}
+	for obj in raw:gmatch("{[^{}]-}") do
+		local L = obj:match('"L"%s*:%s*([%-%d%.eE]+)%s*,%s*"a"')
+		local a = obj:match('"a"%s*:%s*([%-%d%.eE]+)%s*,%s*"b"')
+		local b = obj:match('"b"%s*:%s*([%-%d%.eE]+)%s*[,}]')
+		if L and a and b and not obj:match('"t"%s*:') and not obj:match('"tool"') then
+			local e = { L = tonumber(L), a = tonumber(a), b = tonumber(b),
+				mode = obj:match('"mode"%s*:%s*"(%a+)"') or "snap",
+				hex = obj:match('"hex"%s*:%s*"(#%x+)"') }
+			entry_geometry(e)
+			out[#out + 1] = e
+		end
+	end
+	if #out == 0 then return nil end
+	return out
+end
+
+local function write_profile(path, model, refs, bins, minBin, frame, palette, name)
+	local lines = {}
+	local add = function(s) lines[#lines + 1] = s end
+
+	add("{")
+	add('  "format": "PSN_ColorProfile",')
+	add(string.format('  "version": %d,', PROFILE_VERSION))
+	add(string.format('  "name": "%s",', esc(name)))
+	add(string.format('  "created": "%s",', os.date("%Y-%m-%dT%H:%M:%S")))
+	add('  "space": "sRGB",')
+	add(string.format('  "sample_frame": %d,', math.floor(frame + 0.5)))
+	add(string.format('  "bins": %d,', bins))
+	add(string.format('  "min_bin_pixels": %d,', math.floor(minBin + 0.5)))
+	add('  "refs": [')
+	for i, r in ipairs(refs) do
+		add(string.format(
+			'    {"tool": "%s", "weight": %s, "pixels": %d, "black": %s, "white": %s}%s',
+			esc(r.tool), f6(r.weight), math.floor(r.pixels + 0.5), f6(r.black), f6(r.white),
+			(i < #refs) and "," or ""))
+	end
+	add("  ],")
+
+	local g = model.fin.glob
+	add(string.format(
+		'  "global": {"n": %d, "black": %s, "white": %s, "L": [%s, %s], "a": [%s, %s], "b": [%s, %s]},',
+		math.floor(model.nraw + 0.5), f6(model.black), f6(model.white),
+		f6(g[1]), f6(g[2]), f6(g[3]), f6(g[4]), f6(g[5]), f6(g[6])))
+
+	add('  "luma": [')
+	local fin = model.fin
+	for i = 1, bins do
+		add(string.format(
+			'    {"t": %s, "n": %d, "p": %s, "L": [%s, %s], "a": [%s, %s], "b": [%s, %s]}%s',
+			f6((i - 0.5) / bins), math.floor(fin.nraw[i] + 0.5), f6(fin.p[i]),
+			f6(fin.Lm[i]), f6(fin.Ls[i]), f6(fin.Am[i]), f6(fin.As[i]), f6(fin.Bm[i]), f6(fin.Bs[i]),
+			(i < bins) and "," or ""))
+	end
+	add("  ],")
+
+	add('  "palette": [')
+	for i, c in ipairs(palette) do
+		add(string.format('    {"hex": "%s", "mode": "%s", "L": %s, "a": %s, "b": %s}%s',
+			esc(c.hex or ""), c.mode or "snap", f6(c.L), f6(c.a), f6(c.b), (i < #palette) and "," or ""))
+	end
+	add("  ]")
+	add("}")
+
+	local tmp = path .. ".tmp"
+	local f = io.open(tmp, "w")
+	if not f then return false, "cannot open " .. tmp .. " for writing (does the folder exist?)" end
+	f:write(table.concat(lines, "\n"))
+	f:write("\n")
+	f:close()
+	if not read_file(tmp) then return false, "temp file was not written" end
+	os.remove(path)
+	local ok, err = os.rename(tmp, path)
+	if not ok then return false, "could not replace " .. path .. ": " .. tostring(err) end
+	return true
+end
+
+---------------------------------------------------------------------------
+-- process
+---------------------------------------------------------------------------
+
+local function gatherRefs(req, frame)
+	local refs, pending = {}, {}
+	local flags = req:GetFlags()
+	for i = 1, NREFS do
+		local inp = self:FindInput("Ref" .. i)
+		if inp then
+			local src = inp:GetSource(frame, flags)
+			if src then
+				local wv = 1
+				local win = self:FindInput("Weight" .. i)
+				if win then
+					local okw, wval = pcall(function() return win:GetValue(req).Value end)
+					if okw and type(wval) == "number" then wv = wval end
+				end
+				refs[#refs + 1] = { img = src, weight = wv, tool = "Ref " .. i }
+			else
+				local okc, conn = pcall(function() return inp:GetConnectedOutput() end)
+				if okc and conn then pending[#pending + 1] = "Ref " .. i end
+			end
+		end
+	end
+	return refs, pending
+end
+
+local function buildKey(refs, settings)
+	local parts = { "v4", tostring(settings.bins), tostring(settings.minBin), tostring(settings.frame),
+		settings.path, settings.name, settings.hex, settings.accent }
+	for _, r in ipairs(refs) do
+		parts[#parts + 1] = tostring(r.tool) .. ":" .. f6(r.weight)
+	end
+	return table.concat(parts, "|")
+end
+
+local function ensure_dir(path)
+	local dir = path:match("^(.*)[\\/][^\\/]+$")
+	if dir and dir ~= "" then
+		pcall(function() bmd.createdir(dir) end)
+	end
+end
+
+local function do_build(req, refs, pending, settings, forced)
+	local bins, minBin, frame, path = settings.bins, settings.minBin, settings.frame, settings.path
+
+	if #pending > 0 then
+		print(TAG .. "still loading: " .. table.concat(pending, ", "))
+		if not forced then
+			print(TAG .. "not writing - press Build Profile once the comp has drawn")
+			return
+		end
+	end
+	if #refs == 0 then
+		print(TAG .. "no references connected")
+		return
+	end
+
+	-- palette: hex lists + swatch image; if nothing was given, keep what the file had
+	local accent = parse_hex_list(settings.accent, "hold")
+	local anchors = parse_hex_list(settings.hex, "snap")
+	local fromImage = {}
+	local palImg = InPalette:GetSource(frame, req:GetFlags())
+	if palImg then fromImage = extract_palette(palImg) end
+	local palette = merge_palettes(accent, anchors, fromImage)
+	if #palette == 0 then
+		local prev = previous_palette(path)
+		if prev then
+			palette = prev
+			print(string.format(TAG .. "no palette given, kept %d colours from the existing profile", #palette))
+		end
+	end
+
+	local holds = {}
+	for _, e in ipairs(palette) do if e.mode == "hold" then holds[#holds + 1] = e end end
+
+	local pool = new_pool(bins)
+	local used = {}
+	for _, r in ipairs(refs) do
+		if r.weight > 0 then
+			local res = analyse(r.img, bins, MAX_SAMPLES, holds)
+			if res then
+				r.pixels = res.n
+				r.black, r.white = res.black, res.white
+				pool_add(pool, res, r.weight, bins)
+				used[#used + 1] = r
+			else
+				print(TAG .. "skipped reference " .. tostring(r.tool) .. " (no usable pixels)")
+			end
+		end
+	end
+	if #used == 0 or pool.wsum <= 0 then
+		print(TAG .. "nothing to build")
+		return
+	end
+
+	local prevCount = previous_ref_count(path)
+	if not forced and #used < prevCount then
+		print(string.format(TAG .. "refusing to overwrite: %d refs now, %d in the existing profile", #used, prevCount))
+		return
+	end
+
+	local model = {
+		fin = finalize(pool, bins, minBin),
+		nraw = pool.nraw,
+		black = pool.black / pool.wsum,
+		white = pool.white / pool.wsum,
+	}
+
+	ensure_dir(path)
+	local ok, err = write_profile(path, model, used, bins, minBin, frame, palette, settings.name)
+	if not ok then
+		print(TAG .. tostring(err))
+		return
+	end
+	print(string.format(TAG .. "%d refs, %d bands, %d palette colours -> %s", #used, bins, #palette, path))
+
+	local base = path:match("^(.*)%.[^%.\\/]+$") or path
+	local okp, pres = pcall(write_preview, base .. ".png", model.fin, bins, palette)
+	if okp and pres == true then
+		print(TAG .. "preview -> " .. base .. ".png")
+	elseif okp then
+		print(TAG .. "preview failed: " .. tostring(pres))
+	end
+end
+
+local function do_process(req)
+	local okpre, pre = pcall(function() return req:IsPreCalc() end)
+	if okpre and pre then
+		OutImage:Set(req, nil)
+		return
+	end
+
+	local nodeKey = tostring(self.Name)
+	local forced = forceBuilds[nodeKey] == true
+	local auto = InAuto:GetValue(req).Value > 0.5
+	local frame = InFrame:GetValue(req).Value
+	local flags = req:GetFlags()
+
+	local firstImg
+	if forced or auto then
+		local settings = {
+			bins = clamp(math.floor(InBins:GetValue(req).Value + 0.5), 4, 64),
+			minBin = math.max(0, InMinPix:GetValue(req).Value),
+			frame = frame,
+			path = resolve_path(InPath:GetValue(req).Value),
+			name = tostring(InName:GetValue(req).Value or ""),
+			hex = tostring(InHex:GetValue(req).Value or ""),
+			accent = tostring(InAccent:GetValue(req).Value or ""),
+		}
+		local refs, pending = gatherRefs(req, frame)
+		local key = buildKey(refs, settings)
+		if forced or key ~= cacheKeys[nodeKey] then
+			cacheKeys[nodeKey] = key
+			forceBuilds[nodeKey] = false
+			do_build(req, refs, pending, settings, forced)
+		end
+	end
+
+	local inp = self:FindInput("Ref1")
+	firstImg = inp and inp:GetSource(frame, flags)
+	OutImage:Set(req, firstImg or nil)
+end
+
+function Process(req)
+	local ok, err = pcall(do_process, req)
+	if not ok then
+		print(TAG .. tostring(err))
+		OutImage:Set(req, nil)
+	end
+end
