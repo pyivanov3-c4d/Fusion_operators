@@ -66,13 +66,71 @@ local function addLut(rel, path, fixedKey)
     }
 end
 
-local function dirExists(path)
-    local p = io.popen('cmd /c if exist "' .. path .. '\\*" (echo 1) else (echo 0)')
-    if not p then return false end
-    local out = p:read("*l")
-    p:close()
-    return out == "1"
+-- Fusion is a GUI application: cmd.exe started through io.popen/os.execute gets
+-- its own console window on the desktop. LuaJIT's FFI starts it with
+-- CREATE_NO_WINDOW instead, so the listings run silently.
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel32 = nil
+if ffi_ok then
+    pcall(ffi.cdef, [[
+typedef struct {
+    unsigned long cb;
+    char* lpReserved;
+    char* lpDesktop;
+    char* lpTitle;
+    unsigned long dwX; unsigned long dwY; unsigned long dwXSize; unsigned long dwYSize;
+    unsigned long dwXCountChars; unsigned long dwYCountChars; unsigned long dwFillAttribute;
+    unsigned long dwFlags;
+    unsigned short wShowWindow; unsigned short cbReserved2;
+    unsigned char* lpReserved2;
+    void* hStdInput; void* hStdOutput; void* hStdError;
+} PSN_STARTUPINFOA;
+typedef struct {
+    void* hProcess; void* hThread; unsigned long dwProcessId; unsigned long dwThreadId;
+} PSN_PROCESS_INFORMATION;
+bool CreateProcessA(const char* app, char* cmd, void* pa, void* ta, bool inherit,
+    unsigned long flags, void* env, const char* dir, PSN_STARTUPINFOA* si, PSN_PROCESS_INFORMATION* pi);
+unsigned long WaitForSingleObject(void* h, unsigned long ms);
+bool CloseHandle(void* h);
+]])
+    local ok, lib = pcall(ffi.load, "kernel32")
+    if ok then kernel32 = lib end
 end
+
+local RUN_SEQ = 0
+
+-- Runs a command with no console window and returns its stdout.
+local function runHidden(cmd)
+    local outFile = (os.getenv("TEMP") or ".") .. "\\psn_lut_out_"
+        .. tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1000) % 1000) .. ".txt"
+    if kernel32 then
+        local line = 'cmd.exe /c ' .. cmd .. ' > "' .. outFile .. '" 2>&1'
+        local buf = ffi.new("char[?]", #line + 1)
+        ffi.copy(buf, line)
+        local si = ffi.new("PSN_STARTUPINFOA")
+        si.cb = ffi.sizeof("PSN_STARTUPINFOA")
+        local pi = ffi.new("PSN_PROCESS_INFORMATION")
+        if kernel32.CreateProcessA(nil, buf, nil, nil, false, 0x08000000, nil, nil, si, pi) then
+            kernel32.WaitForSingleObject(pi.hProcess, 120000)
+            kernel32.CloseHandle(pi.hThread)
+            kernel32.CloseHandle(pi.hProcess)
+        end
+    else
+        local p = io.popen("cmd /c " .. cmd)
+        local direct = p and p:read("*a") or ""
+        if p then p:close() end
+        return direct
+    end
+    local out = ""
+    local fh = io.open(outFile, "rb")
+    if fh then
+        out = fh:read("*a") or ""
+        fh:close()
+    end
+    os.remove(outFile)
+    return out
+end
+
 
 local function scanFolder(root, prefix, fixedKey)
     if not root or root == "" then return end
@@ -80,10 +138,9 @@ local function scanFolder(root, prefix, fixedKey)
     for _, pattern in ipairs(LUT_PATTERNS) do
         specs[#specs + 1] = '"' .. root .. '\\' .. pattern .. '"'
     end
-    local p = io.popen('cmd /c dir /b /s ' .. table.concat(specs, " ") .. ' 2>nul')
-    if not p then return end
+    local out = runHidden('dir /b /s ' .. table.concat(specs, " ") .. ' 2>nul')
     local base = (root .. "\\"):upper()
-    for line in p:lines() do
+    for line in out:gmatch("[^\r\n]+") do
         line = line:gsub("%s+$", "")
         if line ~= "" then
             local rel = line
@@ -93,7 +150,6 @@ local function scanFolder(root, prefix, fixedKey)
             addLut((prefix and (prefix .. "/") or "") .. rel, line, fixedKey)
         end
     end
-    p:close()
 end
 
 scanFolder(LUT_FOLDER_DEFAULT, nil, nil)
@@ -103,19 +159,21 @@ scanFolder(LUT_USER_FOLDER, "user", nil)
 -- in place, never copied: Adobe assets stay inside the Photoshop install.
 local function findPhotoshopLuts()
     local base = "C:\\Program Files\\Adobe"
-    local p = io.popen('cmd /c dir /b /ad "' .. base .. '\\Adobe Photoshop *" 2>nul')
-    if not p then return end
-    local findings = {}
-    for line in p:lines() do
+    local out = runHidden('dir /b /ad "' .. base .. '\\Adobe Photoshop *" 2>nul')
+    local candidates = {}
+    for line in out:gmatch("[^\r\n]+") do
         line = line:gsub("%s+$", "")
         if line ~= "" then
-            local candidate = base .. "\\" .. line .. "\\Presets\\3DLUTs"
-            if dirExists(candidate) then findings[#findings + 1] = candidate end
+            candidates[#candidates + 1] = base .. "\\" .. line .. "\\Presets\\3DLUTs"
         end
     end
-    p:close()
-    table.sort(findings)
-    if #findings > 0 then scanFolder(findings[#findings], nil, "photoshop") end
+    table.sort(candidates)
+    -- newest install first; the first one that actually lists files wins
+    for i = #candidates, 1, -1 do
+        local before = #LUT_FILES
+        scanFolder(candidates[i], nil, "photoshop")
+        if #LUT_FILES > before then return end
+    end
 end
 findPhotoshopLuts()
 

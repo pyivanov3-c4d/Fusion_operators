@@ -1,4 +1,4 @@
-﻿--[[--
+--[[--
 PSN_VE_NeuralRender 2.0
 Visual Enhancer (VE_CLI.exe) inside Fusion 20.
 
@@ -84,8 +84,85 @@ local function writeAll(path, data)
 	return true
 end
 
+-- Fusion is a GUI application: cmd.exe started through io.popen/os.execute gets
+-- its own console window on the desktop. LuaJIT's FFI starts it with
+-- CREATE_NO_WINDOW instead, so helper commands run silently.
+local ffi_ok, ffi = pcall(require, "ffi")
+local kernel32 = nil
+if ffi_ok then
+	pcall(ffi.cdef, [[
+typedef struct {
+    unsigned long cb;
+    char* lpReserved;
+    char* lpDesktop;
+    char* lpTitle;
+    unsigned long dwX; unsigned long dwY; unsigned long dwXSize; unsigned long dwYSize;
+    unsigned long dwXCountChars; unsigned long dwYCountChars; unsigned long dwFillAttribute;
+    unsigned long dwFlags;
+    unsigned short wShowWindow; unsigned short cbReserved2;
+    unsigned char* lpReserved2;
+    void* hStdInput; void* hStdOutput; void* hStdError;
+} PSN_STARTUPINFOA;
+typedef struct {
+    void* hProcess; void* hThread; unsigned long dwProcessId; unsigned long dwThreadId;
+} PSN_PROCESS_INFORMATION;
+bool CreateProcessA(const char* app, char* cmd, void* pa, void* ta, bool inherit,
+    unsigned long flags, void* env, const char* dir, PSN_STARTUPINFOA* si, PSN_PROCESS_INFORMATION* pi);
+unsigned long WaitForSingleObject(void* h, unsigned long ms);
+bool CloseHandle(void* h);
+]])
+	local ok, lib = pcall(ffi.load, "kernel32")
+	if ok then kernel32 = lib end
+end
+
+local function spawnHidden(line, wait, timeoutMs)
+	if kernel32 then
+		local buf = ffi.new("char[?]", #line + 1)
+		ffi.copy(buf, line)
+		local si = ffi.new("PSN_STARTUPINFOA")
+		si.cb = ffi.sizeof("PSN_STARTUPINFOA")
+		local pi = ffi.new("PSN_PROCESS_INFORMATION")
+		if kernel32.CreateProcessA(nil, buf, nil, nil, false, 0x08000000, nil, nil, si, pi) then
+			if wait then kernel32.WaitForSingleObject(pi.hProcess, timeoutMs or 600000) end
+			kernel32.CloseHandle(pi.hThread)
+			kernel32.CloseHandle(pi.hProcess)
+			return true
+		end
+		return false
+	end
+	-- No FFI: fall back to the shell (a console window may appear once).
+	local p = io.popen("cmd /c " .. line)
+	if p then
+		if wait then p:read("*a") end
+		p:close()
+	end
+	return true
+end
+
+-- Runs a command with no console window and returns its stdout.
+local function runHidden(cmd)
+	local outFile = (os.getenv("TEMP") or ".") .. "\\psn_ve_out_"
+		.. tostring(os.time()) .. "_" .. tostring(math.floor(os.clock() * 1000) % 1000) .. ".txt"
+	spawnHidden('cmd.exe /c ' .. cmd .. ' > "' .. outFile .. '" 2>&1', true)
+	local out = readAll(outFile) or ""
+	os.remove(outFile)
+	return out
+end
+
+-- Starts a command with no console window and does not wait for it.
+local function runDetached(cmd)
+	spawnHidden(cmd, false)
+end
+
+-- Directories created in this session, so rendering does not re-run mkdir for
+-- every frame.
+DIRS_MADE = DIRS_MADE or {}
 local function ensureDir(path)
-	os.execute('cmd /c if not exist "' .. path .. '" mkdir "' .. path .. '"')
+	if not path or path == "" then return end
+	local key = path:lower()
+	if DIRS_MADE[key] then return end
+	DIRS_MADE[key] = true
+	runHidden('if not exist "' .. path .. '" mkdir "' .. path .. '"')
 end
 
 -- stable djb2 hash over bytes
@@ -291,19 +368,16 @@ end
 local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\luts]]
 local LUT_FILES = {}
 do
-	local p = io.popen('cmd /c dir /b /s "' .. LUT_FOLDER_DEFAULT .. '\\*.cube" 2>nul')
-	if p then
-		local prefix = (LUT_FOLDER_DEFAULT .. "\\"):upper()
-		for line in p:lines() do
-			line = line:gsub("%s+$", "")
-			if line ~= "" then
-				local rel = line
-				local up = line:upper()
-				if up:sub(1, #prefix) == prefix then rel = line:sub(#prefix + 1) end
-				LUT_FILES[#LUT_FILES + 1] = rel
-			end
+	local out = runHidden('dir /b /s "' .. LUT_FOLDER_DEFAULT .. '\\*.cube" 2>nul')
+	local prefix = (LUT_FOLDER_DEFAULT .. "\\"):upper()
+	for line in out:gmatch("[^\r\n]+") do
+		line = line:gsub("%s+$", "")
+		if line ~= "" then
+			local rel = line
+			local up = line:upper()
+			if up:sub(1, #prefix) == prefix then rel = line:sub(#prefix + 1) end
+			LUT_FILES[#LUT_FILES + 1] = rel
 		end
-		p:close()
 	end
 end
 
@@ -938,8 +1012,8 @@ function Process(req)
 			end
 			if not running then
 				writeAll(lock, tostring(os.time()))
-				os.execute(string.format(
-					'cmd /c start "" /b powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s" -SigDir "%s" -Engine "%s" -Preset "%s" -Node "%s" -Refresh "%s"',
+				runDetached(string.format(
+					'powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s" -SigDir "%s" -Engine "%s" -Preset "%s" -Node "%s" -Refresh "%s"',
 					UPD_DIR .. "\\PSN_VE_AutoBake.ps1", outDir, engine, presetPath, key, UPD_DIR .. "\\PSN_VE_Refresh.lua"))
 			end
 
@@ -972,9 +1046,7 @@ function Process(req)
 		writeAll(batPath, "@echo off\r\n" .. cmd .. " 2>&1\r\n")
 
 		local t0 = os.clock()
-		local handle = io.popen('cmd /c "' .. batPath .. '"')
-		local result = handle and handle:read("*a") or ""
-		if handle then handle:close() end
+		local result = runHidden('"' .. batPath .. '"')
 		logTo(cacheDir, string.format("run %s/%.1fs : %s", sig, os.clock() - t0,
 			(result:gsub("%s+", " "):sub(1, 300))))
 

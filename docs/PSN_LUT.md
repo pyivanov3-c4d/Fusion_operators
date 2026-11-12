@@ -94,7 +94,8 @@ The table is parsed once per file and cached for the session. Per pixel: clamp t
 optional sRGB transfer, interpolate (tetrahedral by default), blend with Mix, clip the table result
 to 0-1 (an integer image wraps on overshoot such as a `.look` entry at 1.03), optional transfer
 back, restore any over-range residual, re-apply alpha. Processing is multithreaded through
-`MultiProcessPixels`.
+`MultiProcessPixels`. The folder listings run hidden (FFI `CreateProcessA` + `CREATE_NO_WINDOW`),
+so Fusion shows no console windows when it starts.
 
 ## Validation
 
