@@ -1,19 +1,20 @@
 # PSN_LUT
 
-Photoshop-style **Color Lookup** for Fusion: applies a `.cube` LUT to the image, with the free
-LUT packs bundled for the Neural Render operator listed by category in one dropdown.
+Photoshop-style **Color Lookup** for Fusion: applies a 3D LUT to the image from the free film packs,
+and from Photoshop's own Color Lookup presets.
 
 ## Controls
 
-- **Category** — the LUT folder's subfolders become categories: **All LUTs**, **Slay**, **B&W**,
-  **Slide**, **X-Trans**, **Instant**, **Instant Pro**, **Neg Colour**, **Neg New**, **Neg Old**,
-  **Print**, plus **User** when the user LUTs folder has files. The LUT menu below shows only the
+- **Category** — the LUT folder's subfolders become categories: **All LUTs**, **Photoshop**,
+  **Slay**, **B&W**, **Slide**, **X-Trans**, **Instant**, **Instant Pro**, **Neg Colour**,
+  **Neg New**, **Neg Old**, **Print**, plus **User** when the user LUTs folder has files. The LUT menu below shows only the
   chosen category, so picking is a short list instead of 300 entries. Switching category applies
   that category's first LUT.
 - **LUT** — the LUTs of the chosen category, or the full flat list (`film/bw/...`,
   `film/print/...`, `slay-...`) under **All LUTs**. The first entry, **(file below)**, means "use
   the file field".
-- **LUT file** — always shows the LUT that is in use. Type or browse for a `.cube` anywhere on
+- **LUT file** — always shows the LUT that is in use. Type or browse for a `.cube`, `.3dl` or
+  `.look` anywhere on
   disk; the menu switches to **(file below)**. Choosing a menu entry writes that entry's path
   here.
 - **Mix (%)** — 0–100, default **100**. Blended in the LUT's own encoding, between the original
@@ -60,17 +61,38 @@ default encoding applies them to the values Fusion supplies.
 The list is built at startup. Add files to the folder and restart Fusion to see them; a single
 LUT outside the folder can be used immediately through **LUT file**.
 
+## Photoshop presets
+
+**Photoshop** lists the 27 Color Lookup presets that ship with Adobe Photoshop:
+`C:\Program Files\Adobe\Adobe Photoshop <version>\Presets\3DLUTs` — 10 `.cube`, 10 `.3dl`
+and 7 `.look` files (2Strip, 3Strip, Bleach Bypass, Candlelight, Crisp_Warm, Crisp_Winter,
+DropBlues, EdgyAmber, FallColors, filmstock_50, FoggyNight, the Fuji and Kodak looks by Adobe,
+FuturisticBleak, HorrorBlue, LateSunset, Moonlight, NightFromDay, Soft_Warming,
+TealOrangePlusContrast, TensionGreen).
+
+The folder is found automatically (the newest `Adobe Photoshop *` install is used) and read in
+place: the presets are Adobe's assets and are never copied or redistributed with this operator.
+Without Photoshop the category is simply absent.
+
+`.look` is XML; the look is read from the 3D table embedded in the file (8³, 16³ for
+FallColors). The shader block that Photoshop stores next to it is not evaluated, so a `.look`
+can differ from Photoshop's own live rendering of the same file.
+
 ## Format support
 
 - 3D `.cube` (`LUT_3D_SIZE`), 1D `.cube` (`LUT_1D_SIZE`), and a file carrying both (1D stage
   first, then the cube, as the spec orders them).
 - `DOMAIN_MIN` / `DOMAIN_MAX` and `LUT_3D_INPUT_RANGE`; `.cube` red-fastest value order.
-- Not supported: `.3dl`, `.spi1d`, `.look`, `.asv` presets, ICC profiles, log/ACES conversions.
+- `.3dl` (Lustre/Flame text mesh: 17³ grid line, integer triples, mesh and 3DMESH headers,
+  12-bit data in Adobe's files).
+- `.look` (Photoshop XML with a hex-encoded little-endian float32 table).
+- Not supported: `.spi1d`, `.asv` presets, ICC profiles, log/ACES conversions.
 
 ## Method
 
-The cube is parsed once per file and cached for the session. Per pixel: clamp to the cube domain,
-optional sRGB transfer, interpolate (tetrahedral by default), blend with Mix, optional transfer
+The table is parsed once per file and cached for the session. Per pixel: clamp to the table domain,
+optional sRGB transfer, interpolate (tetrahedral by default), blend with Mix, clip the table result
+to 0-1 (an integer image wraps on overshoot such as a `.look` entry at 1.03), optional transfer
 back, restore any over-range residual, re-apply alpha. Processing is multithreaded through
 `MultiProcessPixels`.
 
@@ -94,6 +116,18 @@ chart:
 
 The residual half-level is the 8-bit write (the reference rounds, Fusion truncates). Reports:
 `tests/lut/results.json`; renders in `renders/lut/cases/`.
+
+Photoshop presets, same chart, read in place from the Adobe install:
+
+| Case | File | Table | Max |
+| --- | --- | --- | --- |
+| ps_look_2strip | 2Strip.look | 8³ | 1/255 |
+| ps_look_fallcolors | FallColors.look | 16³ | 1/255 |
+| ps_3dl_dropblues | DropBlues.3DL | 17³ | 1/255 |
+| ps_3dl_moonlight | Moonlight.3DL | 17³ | 1/255 |
+| ps_cube_kodak5218 | Kodak 5218 Kodak 2383 (by Adobe).cube | 21³ | 1/255 |
+
+Report: `tests/lut/photoshop-results.json`; renders in `renders/lut/photoshop/`.
 
 Behaviour checks, all passing with a clean console:
 

@@ -19,21 +19,27 @@ FuRegisterClass("PSN_LUT", CT_Tool, {
 
 -- ---------------------------------------------------------------- LUT library
 
--- The list is scanned once when Fusion starts: the workspace packs first, then
--- the user's own Fusion LUTs folder. Subfolders become the Category menu.
+-- The list is scanned once when Fusion starts: the workspace packs, the user's
+-- own Fusion LUTs folder, and Photoshop's Color Lookup presets. Subfolders and
+-- the Adobe presets become the Category menu.
 local LUT_FOLDER_DEFAULT = [[C:\__Work\_DeepSeek\Fusion\luts]]
 local LUT_USER_FOLDER = ((os.getenv("APPDATA") or "") .. "\\Blackmagic Design\\Fusion\\LUTs")
 
 -- Category order and labels. Keys come from the folder layout: film\<key>\ for
--- the film pack, slay for the top-level slay files, user for the user's folder.
-local CAT_ORDER = { "slay", "bw", "colorslide", "fujixtransiii", "instant_consumer",
-    "instant_pro", "negative_color", "negative_new", "negative_old", "print", "user" }
+-- the film pack, slay for the top-level slay files, photoshop for the Adobe
+-- 3DLUT presets, user for the user's folder.
+local CAT_ORDER = { "photoshop", "slay", "bw", "colorslide", "fujixtransiii",
+    "instant_consumer", "instant_pro", "negative_color", "negative_new", "negative_old",
+    "print", "user" }
 local CAT_LABEL = {
+    photoshop = "Photoshop",
     slay = "Slay", bw = "B&W", colorslide = "Slide", fujixtransiii = "X-Trans",
     instant_consumer = "Instant", instant_pro = "Instant Pro",
     negative_color = "Neg Colour", negative_new = "Neg New", negative_old = "Neg Old",
     print = "Print", user = "User", root = "Top level",
 }
+
+local LUT_PATTERNS = { "*.cube", "*.3dl", "*.look" }
 
 local function categoryOf(rel)
     local dir = rel:match("^(.*)/[^/]+$")
@@ -50,19 +56,31 @@ local LUT_FILES = {}     -- every file, sorted by category/name
 local LUT_BUCKETS = {}   -- category key -> files of that category
 local CAT_KEYS = {}
 
-local function addLut(rel, path)
-    local entry = {
+local function addLut(rel, path, fixedKey)
+    LUT_FILES[#LUT_FILES + 1] = {
         label = rel,                   -- category/name
         short = rel:match("([^/]+)$"), -- name only
         path = path,
-        key = categoryOf(rel),
+        key = fixedKey or categoryOf(rel),
+        ext = (path:match("%.([^%.\\/]+)$") or ""):lower(),
     }
-    LUT_FILES[#LUT_FILES + 1] = entry
 end
 
-local function scanFolder(root, prefix)
+local function dirExists(path)
+    local p = io.popen('cmd /c if exist "' .. path .. '\\*" (echo 1) else (echo 0)')
+    if not p then return false end
+    local out = p:read("*l")
+    p:close()
+    return out == "1"
+end
+
+local function scanFolder(root, prefix, fixedKey)
     if not root or root == "" then return end
-    local p = io.popen('cmd /c dir /b /s "' .. root .. '\\*.cube" 2>nul')
+    local specs = {}
+    for _, pattern in ipairs(LUT_PATTERNS) do
+        specs[#specs + 1] = '"' .. root .. '\\' .. pattern .. '"'
+    end
+    local p = io.popen('cmd /c dir /b /s ' .. table.concat(specs, " ") .. ' 2>nul')
     if not p then return end
     local base = (root .. "\\"):upper()
     for line in p:lines() do
@@ -72,16 +90,42 @@ local function scanFolder(root, prefix)
             local up = line:upper()
             if up:sub(1, #base) == base then rel = line:sub(#base + 1) end
             rel = rel:gsub("\\", "/"):gsub("%.[^/]+$", "")
-            addLut((prefix and (prefix .. "/") or "") .. rel, line)
+            addLut((prefix and (prefix .. "/") or "") .. rel, line, fixedKey)
         end
     end
     p:close()
 end
 
-scanFolder(LUT_FOLDER_DEFAULT, nil)
-scanFolder(LUT_USER_FOLDER, "user")
+scanFolder(LUT_FOLDER_DEFAULT, nil, nil)
+scanFolder(LUT_USER_FOLDER, "user", nil)
 
-table.sort(LUT_FILES, function(a, b) return a.label:lower() < b.label:lower() end)
+-- Photoshop ships its Color Lookup presets with the application. They are used
+-- in place, never copied: Adobe assets stay inside the Photoshop install.
+local function findPhotoshopLuts()
+    local base = "C:\\Program Files\\Adobe"
+    local p = io.popen('cmd /c dir /b /ad "' .. base .. '\\Adobe Photoshop *" 2>nul')
+    if not p then return end
+    local findings = {}
+    for line in p:lines() do
+        line = line:gsub("%s+$", "")
+        if line ~= "" then
+            local candidate = base .. "\\" .. line .. "\\Presets\\3DLUTs"
+            if dirExists(candidate) then findings[#findings + 1] = candidate end
+        end
+    end
+    p:close()
+    table.sort(findings)
+    if #findings > 0 then scanFolder(findings[#findings], nil, "photoshop") end
+end
+findPhotoshopLuts()
+
+-- Keep the Photoshop presets after the workspace packs so the full list's
+-- indices stay stable for compositions saved before the section existed.
+table.sort(LUT_FILES, function(a, b)
+    local aPs, bPs = (a.key == "photoshop"), (b.key == "photoshop")
+    if aPs ~= bPs then return bPs end
+    return a.label:lower() < b.label:lower()
+end)
 for _, entry in ipairs(LUT_FILES) do
     local bucket = LUT_BUCKETS[entry.key]
     if not bucket then
@@ -223,10 +267,121 @@ local function parseCube(path)
     return lut
 end
 
+-- Lustre/Flame .3dl: optional 3DMESH/Mesh header lines, a grid line (one number
+-- per mesh point, e.g. 17 values ending at 1023), then integer triples on the
+-- same scale, red varying fastest.
+local function parse3dl(path)
+    local fh = io.open(path, "rb")
+    if not fh then return nil, "cannot open file" end
+    local data = fh:read("*a") or ""
+    fh:close()
+    if data:sub(1, 3) == "\239\187\191" then data = data:sub(4) end
+    if #data < 16 then return nil, "file is empty" end
+
+    local size, maxval, dataMax
+    local nums, count = {}, 0
+    for line in data:gmatch("[^\r\n]+") do
+        local body = line:gsub("#.*$", "")
+        body = body:gsub("^%s+", ""):gsub("%s+$", "")
+        local head = body:upper()
+        if body ~= "" and head:sub(1, 8) ~= "3DMESH" and head:sub(1, 4) ~= "MESH" then
+            local values = {}
+            for token in body:gmatch("%-?%d+") do values[#values + 1] = tonumber(token) end
+            if not size and #values > 3 then
+                size = #values
+                maxval = values[#values]
+            elseif #values == 3 then
+                nums[count + 1], nums[count + 2], nums[count + 3] = values[1], values[2], values[3]
+                dataMax = math.max(dataMax or 0, values[1], values[2], values[3])
+                count = count + 3
+            end
+        end
+    end
+
+    if not size or size < 2 then return nil, "no mesh line" end
+    if not maxval or maxval <= 1 then maxval = 1023 end
+    -- Adobe's .3dl files store 12-bit data even though the mesh line ends at 1023
+    if dataMax and dataMax > maxval then maxval = (dataMax > 1023) and 4095 or 1023 end
+    local expected = size * size * size * 3
+    if count < expected then
+        return nil, string.format("truncated data: %d of %d values", count, expected)
+    end
+
+    local scale = 1 / maxval
+    local lut = { n3 = size, dmin = { 0, 0, 0 }, dmax = { 1, 1, 1 },
+        desc = string.format("%dx%dx%d .3dl", size, size, size), entries = expected / 3 }
+    lut.r3, lut.g3, lut.b3 = {}, {}, {}
+    for i = 1, size * size * size do
+        local o = (i - 1) * 3
+        lut.r3[i] = nums[o + 1] * scale
+        lut.g3[i] = nums[o + 2] * scale
+        lut.b3[i] = nums[o + 3] * scale
+    end
+    return lut
+end
+
+-- Photoshop .look: XML that carries the baked 3D table as little-endian
+-- float32 in a hex block. The size element is authoritative.
+local function float32le(s, offset)
+    local b1, b2, b3, b4 = s:byte(offset, offset + 3)
+    if not b1 then return 0 end
+    local sign = 1
+    if b4 >= 128 then sign = -1; b4 = b4 - 128 end
+    local exponent = b4 * 2 + math.floor(b3 / 128)
+    local mantissa = (b3 % 128) * 65536 + b2 * 256 + b1
+    if exponent == 0 then
+        if mantissa == 0 then return 0 end
+        return sign * mantissa * 2 ^ -149
+    end
+    if exponent == 255 then return 0 end
+    return sign * (1 + mantissa / 8388608) * 2 ^ (exponent - 127)
+end
+
+local function parseLook(path)
+    local fh = io.open(path, "rb")
+    if not fh then return nil, "cannot open file" end
+    local data = fh:read("*a") or ""
+    fh:close()
+    if #data < 64 then return nil, "file is empty" end
+
+    local block = data:match("<data>(.-)</data>")
+    if not block then return nil, "no LUT block" end
+    local hex = block:gsub("[^%x]", "")
+    if #hex < 24 then return nil, "empty LUT block" end
+    local bytes = hex:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end)
+
+    local n3 = tonumber(data:match("<size>%s*\"?%s*(%d+)"))
+    if not n3 or n3 < 2 then
+        n3 = math.floor(((#bytes / 12) + 0.5) ^ (1 / 3) + 0.5)
+    end
+    local expected = n3 * n3 * n3 * 3
+    if math.floor(#bytes / 4) < expected then
+        return nil, string.format("truncated LUT: %d of %d floats", math.floor(#bytes / 4), expected)
+    end
+
+    local lut = { n3 = n3, dmin = { 0, 0, 0 }, dmax = { 1, 1, 1 },
+        desc = string.format("%dx%dx%d .look", n3, n3, n3), entries = expected }
+    lut.r3, lut.g3, lut.b3 = {}, {}, {}
+    for i = 1, n3 * n3 * n3 do
+        local o = (i - 1) * 12 + 1
+        lut.r3[i] = float32le(bytes, o)
+        lut.g3[i] = float32le(bytes, o + 4)
+        lut.b3[i] = float32le(bytes, o + 8)
+    end
+    return lut
+end
+
+local function parseLut(path)
+    local ext = (path:match("%.([^%.\\/]+)$") or ""):lower()
+    if ext == "3dl" then return parse3dl(path) end
+    if ext == "look" then return parseLook(path) end
+    return parseCube(path)
+end
+
 local function loadLUT(path)
     local hit = CACHE[path]
     if hit then return hit end
-    local lut, err = parseCube(path)
+    local lut, err = parseLut(path)
     if not lut then
         hit = { error = err or "unreadable" }
         CACHE[path] = hit
@@ -618,6 +773,13 @@ local processPixel = function(x, y, p)
         if eg <= 0.04045 then eg = eg / 12.92 else eg = ((eg + 0.055) / 1.055) ^ 2.4 end
         if eb <= 0.04045 then eb = eb / 12.92 else eb = ((eb + 0.055) / 1.055) ^ 2.4 end
     end
+
+    -- LUT tables can overshoot 0-1 a little (a .look table reaches 1.03) and an
+    -- integer image wraps on that, so clip the table result. The input's own
+    -- over-range in a float comp is added afterwards.
+    if er < 0 then er = 0 elseif er > 1 then er = 1 end
+    if eg < 0 then eg = 0 elseif eg > 1 then eg = 1 end
+    if eb < 0 then eb = 0 elseif eb > 1 then eb = 1 end
 
     if preserve then
         er = er + (vr - cr)
