@@ -1,0 +1,81 @@
+-- PSN_Explode 1.4
+-- Splits one image into four separate image outputs, one per channel.
+-- Each output carries its channel as a greyscale image AND in the alpha channel, so the
+-- outputs can be dropped straight onto the Effect Mask input of any downstream node.
+
+-- The icon (PSN_Explode.png) ships next to the .fuse file. Fusion wants an absolute path
+-- for REGS_IconID, so look for it next to this fuse first and then in the two standard
+-- Fusion folders. If nothing is found the tool falls back to Fusion's default icon.
+local IconFile = (function()
+    local function exists(p)
+        local f = io.open(p, "rb")
+        if f then f:close(); return true end
+        return false
+    end
+    local candidates = {}
+    local ok, info = pcall(function() return debug.getinfo(1, "S") end)
+    if ok and info and info.source then
+        local src = info.source:gsub("^@", "")
+        local dir = src:match("^(.*)[/\\][^/\\]+$")
+        if dir then candidates[#candidates + 1] = dir .. "/PSN_Explode.png" end
+    end
+    local appdata = os.getenv("APPDATA")
+    if appdata then
+        candidates[#candidates + 1] = appdata .. "/Blackmagic Design/Fusion/Fuses/PSN_Explode.png"
+        candidates[#candidates + 1] = appdata .. "/Blackmagic Design/Fusion/Icons/PSN_Explode.png"
+    end
+    for _, p in ipairs(candidates) do
+        if exists(p) then return p end
+    end
+    return nil
+end)()
+
+FuRegisterClass("PSN_Explode", CT_Tool, {
+    REGS_Name = "PSN_Explode",
+    REGS_Category = "PSN\\Channel",
+    REGS_OpIconString = "Exp",
+    REGS_OpDescription = "Explodes an image into four outputs: Red, Green, Blue and Alpha, each as a greyscale channel",
+    REGS_IconID = IconFile,
+    REG_NoMotionBlurCtrls = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false,
+})
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
+    })
+    -- LINK_Main must be unique per output: Fusion orders the output pins by it.
+    OutRed = self:AddOutput("Red", "Red", {LINKID_DataType = "Image", LINK_Main = 1})
+    OutGreen = self:AddOutput("Green", "Green", {LINKID_DataType = "Image", LINK_Main = 2})
+    OutBlue = self:AddOutput("Blue", "Blue", {LINKID_DataType = "Image", LINK_Main = 3})
+    OutAlpha = self:AddOutput("Alpha", "Alpha", {LINKID_DataType = "Image", LINK_Main = 4})
+end
+
+-- Runs inside MultiProcessPixels' isolated per-thread environment.
+-- `channel` comes from the extraParams table passed to Process:
+-- 1 = Red, 2 = Green, 3 = Blue, 4 = Alpha.
+-- The channel value goes into RGB and into alpha: mask inputs (Effect Mask, Garbage
+-- Matte, ...) read the alpha channel, so each output works as a matte without extra nodes.
+local processChannel = function(x, y, p)
+    local v
+    if channel == 1 then v = p.R
+    elseif channel == 2 then v = p.G
+    elseif channel == 3 then v = p.B
+    else v = p.A end
+    p.R, p.G, p.B = v, v, v
+    p.A = v
+    return p
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    if not src then return end
+    src:DownloadGPUMem(req)
+    local outs = {{OutRed, 1}, {OutGreen, 2}, {OutBlue, 3}, {OutAlpha, 4}}
+    for _, o in ipairs(outs) do
+        local dst = Image({IMG_Like = src})
+        dst:MultiProcessPixels(nil, {channel = o[2]}, 0, 0, src.Width, src.Height, src, processChannel)
+        o[1]:Set(req, dst)
+    end
+end
