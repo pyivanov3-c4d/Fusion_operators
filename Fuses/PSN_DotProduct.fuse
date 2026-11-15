@@ -1,0 +1,167 @@
+-- PSN_DotProduct 1.0
+-- Normal-map direction matte.
+--
+-- One texel is sampled at the screen position (default: image centre) and both
+-- that texel and every image pixel are read as a 3D vector. The output is the
+-- dot product of the two unit vectors, clamped to 0..1 and raised to a power,
+-- written to R, G, B and A as a black-and-white matte.
+--
+-- The icon (PSN_DotProduct.png) ships next to the .fuse. Fusion wants an absolute
+-- path for REGS_IconID, so look next to this fuse first, then in the two standard
+-- Fusion folders. Without the file the tool falls back to Fusion's default icon.
+
+local IconFile = (function()
+    local function exists(p)
+        local f = io.open(p, "rb")
+        if f then f:close(); return true end
+        return false
+    end
+    local candidates = {}
+    local ok, info = pcall(function() return debug.getinfo(1, "S") end)
+    if ok and info and info.source then
+        local src = info.source:gsub("^@", "")
+        local dir = src:match("^(.*)[/\\][^/\\]+$")
+        if dir then candidates[#candidates + 1] = dir .. "/PSN_DotProduct.png" end
+    end
+    local appdata = os.getenv("APPDATA")
+    if appdata then
+        candidates[#candidates + 1] = appdata .. "/Blackmagic Design/Fusion/Fuses/PSN_DotProduct.png"
+        candidates[#candidates + 1] = appdata .. "/Blackmagic Design/Fusion/Icons/PSN_DotProduct.png"
+    end
+    for _, p in ipairs(candidates) do
+        if exists(p) then return p end
+    end
+    return nil
+end)()
+
+FuRegisterClass("PSN_DotProduct", CT_Tool, {
+    REGS_Name = "PSN_DotProduct",
+    REGS_Category = "PSN\\Mask",
+    REGS_OpIconString = "Dot",
+    REGS_OpDescription = "Normal-map direction matte: dot product against a picked texel, raised to a power",
+    REGS_IconID = IconFile,
+    REG_NoMotionBlurCtrls = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false,
+})
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
+    })
+    OutImage = self:AddOutput("Output", "Output", {LINKID_DataType = "Image", LINK_Main = 1})
+
+    -- Normalised 0..1 position with a draggable crosshair in the viewer.
+    InPosition = self:AddInput("Position", "Position", {
+        LINKID_DataType = "Point",
+        INPID_InputControl = "OffsetControl",
+        INPID_PreviewControl = "PointControl",
+        INP_DefaultX = 0.5,
+        INP_DefaultY = 0.5,
+        INP_DoNotifyChanged = true,
+        PC_Visible = true,
+        INPS_StatusText = "Screen position of the normal-map texel the image is compared against. Drag the crosshair in the viewer; 0.5, 0.5 is the image centre.",
+    })
+
+    InPower = self:AddInput("Power", "Power", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "SliderControl",
+        INP_Default = 1,
+        INP_MinScale = 0,
+        INP_MaxScale = 1,
+        INP_MinAllowed = 0,
+        INP_MaxAllowed = 1,
+        INPS_StatusText = "1 = dot product as is. 0 = dot product raised to the power of 10. The exponent interpolates linearly between the two.",
+    })
+
+    InDecode = self:AddInput("Decode Normal Map", "Decode", {
+        LINKID_DataType = "Number",
+        INPID_InputControl = "CheckboxControl",
+        INP_Default = 1,
+        INPS_StatusText = "On: vector = 2 x RGB - 1, the standard tangent-space normal-map decode. Off: raw RGB is used as the vector (already signed vector maps).",
+    })
+end
+
+-- Runs inside MultiProcessPixels' isolated per-thread environment. Free variables
+-- nx/ny/nz (unit vector of the picked texel), power and decode come from the
+-- extraParams table passed by Process.
+local processPixel = function(x, y, p)
+    local a = p.A
+    local r, g, b = p.R, p.G, p.B
+    -- Fusion stores premultiplied RGB; the matte has to read the stored data values.
+    if a > 0 and a < 1 then
+        local inv = 1 / a
+        r, g, b = r * inv, g * inv, b * inv
+    end
+    if decode then
+        r, g, b = 2 * r - 1, 2 * g - 1, 2 * b - 1
+    end
+    local len = math.sqrt(r * r + g * g + b * b)
+    if len > 1e-6 then
+        local inv = 1 / len
+        r, g, b = r * inv, g * inv, b * inv
+    else
+        r, g, b = 0, 0, 0
+    end
+    local d = r * nx + g * ny + b * nz
+    if d <= 0 then
+        p.R, p.G, p.B, p.A = 0, 0, 0, 0
+        return p
+    end
+    if d > 1 then d = 1 end
+    if power ~= 1 then d = d ^ power end
+    p.R, p.G, p.B, p.A = d, d, d, d
+    return p
+end
+
+-- Normalised 0..1 position -> texel index, clamped to the frame.
+local function pickIndex(v, dim)
+    local i = math.floor(v * dim)
+    if i < 0 then return 0 end
+    if i > dim - 1 then return dim - 1 end
+    return i
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    if not src then return end
+    src:DownloadGPUMem(req)
+
+    local w, h = src.Width, src.Height
+    if w < 1 or h < 1 then return end
+
+    local pos = InPosition:GetValue(req)
+    -- Fusion image space is bottom-up: y = 0 is the bottom row, and so is the
+    -- viewer position control's y.
+    local px = pickIndex(pos.X, w)
+    local py = pickIndex(pos.Y, h)
+
+    local pick = Pixel()
+    src:GetPixel(px, py, pick)
+    local r, g, b = pick.R, pick.G, pick.B
+    if pick.A > 0 and pick.A < 1 then
+        local inv = 1 / pick.A
+        r, g, b = r * inv, g * inv, b * inv
+    end
+    local decode = InDecode:GetValue(req).Value > 0.5
+    if decode then
+        r, g, b = 2 * r - 1, 2 * g - 1, 2 * b - 1
+    end
+    local len = math.sqrt(r * r + g * g + b * b)
+    if len > 1e-6 then
+        local inv = 1 / len
+        r, g, b = r * inv, g * inv, b * inv
+    else
+        r, g, b = 0, 0, 0
+    end
+
+    local t = InPower:GetValue(req).Value
+    if t < 0 then t = 0 elseif t > 1 then t = 1 end
+    local power = 1 + 9 * (1 - t)
+
+    local dst = Image({IMG_Like = src})
+    dst:MultiProcessPixels(nil, {
+        nx = r, ny = g, nz = b, power = power, decode = decode,
+    }, 0, 0, w, h, src, processPixel)
+    OutImage:Set(req, dst)
+end
