@@ -34,7 +34,7 @@ FuRegisterClass("PSN_Explode", CT_Tool, {
     REGS_Name = "PSN_Explode",
     REGS_Category = "PSN\\Channel",
     REGS_OpIconString = "Exp",
-    REGS_OpDescription = "Explodes an image into four outputs: Red, Green, Blue and Alpha, each as a greyscale channel",
+    REGS_OpDescription = "Red, Green, Blue and Alpha channel outputs",
     REGS_IconID = IconFile,
     REG_NoMotionBlurCtrls = true,
     REG_Fuse_NoEdit = false,
