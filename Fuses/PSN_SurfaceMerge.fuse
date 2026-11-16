@@ -1,29 +1,21 @@
-﻿-- PSN_SurfaceMerge 0.2
--- Surface-aware place / merge: a second image is laid onto an estimated
--- surface, so it tilts with the local plane, is occluded by geometry in front
--- of it, picks up the background light, and casts a short contact shadow.
+﻿-- PSN_SurfaceMerge 1.0
+-- Place a sticker tangentially on a picked point of a surface.
 --
--- Geometry model
---   A depth plane is least-squares fitted to the surface around the anchor.
---   That plane supplies the tilt (its normal), the scale (anchor depth) and the
---   occlusion test (a pixel is in front of the placement when the surface depth
---   exceeds the plane depth there). Fitting instead of reading a single normal
---   keeps the plane consistent with the depth map's own units, which is what
---   makes the occlusion threshold meaningful.
+-- One job: the plane of the sticker is the tangent plane of the surface at the
+-- picked point. The sticker's two axes run along the two orthogonal tangents of
+-- that plane, so the placement is foreshortened exactly as the plane is, and the
+-- two axes stay perpendicular in 3D. Blending, shadow and light belong to the
+-- rest of the comp, not here.
 --
--- Inputs
---   Surface: optional packed map, R,G = folded normal, B = relative depth
---   (nearer = brighter), A = coverage. Without it, height and normals are
---   derived from background luminance (shading-based approximation).
+-- The normal comes from a normal map (any value in R,G,B). Without one the plane
+-- is parallel to the screen, which is the flat placement.
 --
--- This is a screen-space cheat, not a camera solve. It reads correctly for a
--- placement resting on a surface and drifts at grazing angles.
+-- This is a projective cheat in screen space, not a 3D card: the anchor plane is
+-- projected with a linear tangent frame, which is exact for the plane itself and
+-- drifts only when the placement is large compared with the camera distance.
 
-local TAG = "[PSN_SurfaceMerge] "
 local LOGPATH = "C:\\__Work\\_DeepSeek\\Fusion\\_psn_surfacemerge.log"
 
--- Logging must never be the reason a frame fails: fuses run in a restricted
--- environment and io can be unavailable.
 local function logline(msg)
     pcall(function()
         local f = io.open(LOGPATH, "a")
@@ -38,7 +30,7 @@ FuRegisterClass("PSN_SurfaceMerge", CT_Tool, {
     REGS_Name = "PSN_SurfaceMerge",
     REGS_Category = "PSN\\Merge",
     REGS_OpIconString = "SMrg",
-    REGS_OpDescription = "Surface-aware place/merge: tilts a second image onto an estimated surface, with occlusion, contact shadow and light adaptation",
+    REGS_OpDescription = "Place a sticker tangentially on a surface: the sticker plane equals the tangent plane at the picked point",
     REG_NoMotionBlurCtrls = true,
     REG_Fuse_NoEdit = false,
     REG_Fuse_NoReload = false,
@@ -47,24 +39,15 @@ FuRegisterClass("PSN_SurfaceMerge", CT_Tool, {
 function Create()
     InBackground = self:AddInput("Background", "Background", {
         LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
-        INPS_StatusText = "The scene the second image is placed into. Its depth/normal geometry drives the placement.",
+        INPS_StatusText = "The scene the sticker is placed into.",
     })
-    InForeground = self:AddInput("Foreground", "Foreground", {
+    InForeground = self:AddInput("Sticker", "Foreground", {
         LINKID_DataType = "Image", LINK_Main = 2, INP_AcceptsDoD = false,
-        INPS_StatusText = "The image placed on the surface. Premultiplied alpha is expected, as in any Fusion image.",
+        INPS_StatusText = "The image being placed. Premultiplied alpha, as usual in Fusion.",
     })
-    InSurface = self:AddInput("Surface", "Surface", {
+    InNormal = self:AddInput("Normal", "NormalMap", {
         LINKID_DataType = "Image", LINK_Main = 3, INP_AcceptsDoD = false, INP_Required = false, INP_Optional = true,
-        INPS_StatusText = "Optional packed surface map: R,G = folded normal, B = relative depth (nearer = brighter), A = coverage. Unconnected: geometry is derived from background luminance.",
-    })
-    InSurfaceMode = self:AddInput("Surface Type", "SurfaceMode", {
-        LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
-        { CCS_AddString = "Packed RGBA (normal + depth)" },
-        { CCS_AddString = "Depth only (normals from gradient)" },
-        INPS_StatusText = "Packed expects R,G = folded normal and B = depth, as Mapshroom writes it. Depth only reads the map as a plain depth image and derives normals from its gradient.",
-    })    InMask = self:AddInput("Mask", "Mask", {
-        LINKID_DataType = "Image", LINK_Main = 4, INP_AcceptsDoD = false, INP_Required = false, INP_Optional = true,
-        INPS_StatusText = "Optional matte multiplied into the placement. Only its alpha is used.",
+        INPS_StatusText = "Normal map: R,G,B = x,y,z of the surface normal. Unconnected means a plane parallel to the screen. If a horizontal top face reads as facing down, enable Flip Normal Y.",
     })
 
     InPosition = self:AddInput("Position", "Position", {
@@ -75,150 +58,78 @@ function Create()
         INP_DefaultY = 0.5,
         INP_DoNotifyChanged = true,
         PC_Visible = true,
-        INPS_StatusText = "Anchor point of the placement, in normalised screen coordinates (0,0 = bottom left). Drag the crosshair in the viewer.",
+        INPS_StatusText = "The point where the sticker touches the surface. The plane orientation is read from the normal at this point.",
     })
     InSize = self:AddInput("Size", "Size", {
         LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0.4, INP_MinScale = 0.02, INP_MaxScale = 2,
+        INP_Default = 0.3, INP_MinScale = 0.02, INP_MaxScale = 2,
         INP_MinAllowed = 0.001, INP_MaxAllowed = 8,
-        INPS_StatusText = "Width of the placed image as a fraction of the frame height, on the anchor plane.",
+        INPS_StatusText = "Width of the sticker in the surface plane, as a fraction of the frame height.",
     })
     InAspect = self:AddInput("Aspect", "Aspect", {
         LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
         INP_Default = 1, INP_MinScale = 0.1, INP_MaxScale = 4,
         INP_MinAllowed = 0.01, INP_MaxAllowed = 20,
-        INPS_StatusText = "Height of the placement relative to Size, in plane space.",
+        INPS_StatusText = "Height of the sticker relative to Size, measured in the surface plane before projection.",
     })
     InRotation = self:AddInput("Rotation", "Rotation", {
         LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
         INP_Default = 0, INP_MinScale = -180, INP_MaxScale = 180,
         INP_MinAllowed = -3600, INP_MaxAllowed = 3600,
-        INPS_StatusText = "Rotation of the placement inside the anchor plane, in degrees.",
-    })
-    InRoundness = self:AddInput("Roundness", "Roundness", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "0 = square footprint, 1 = circular footprint. The foreground's own alpha still defines its shape.",
+        INPS_StatusText = "Spin of the sticker inside the surface plane, in degrees.",
     })
     InEdge = self:AddInput("Edge Softness", "EdgeSoftness", {
         LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0.04, INP_MinScale = 0, INP_MaxScale = 0.5,
+        INP_Default = 0.03, INP_MinScale = 0, INP_MaxScale = 0.5,
         INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "Softness of the placement footprint edge, as a fraction of its half size.",
+        INPS_StatusText = "Softness of the sticker's outer edge, as a fraction of its half size. The sticker's own alpha is still respected.",
     })
-
-    self:BeginControlNest("Surface", "SurfaceNest", true, {})
-    InRelief = self:AddInput("Relief", "Relief", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 1, INP_MinScale = 0, INP_MaxScale = 3,
-        INP_MinAllowed = -5, INP_MaxAllowed = 5,
-        INPS_StatusText = "Scales the surface normal taken at the anchor: how hard the placement tilts. With a Surface map this is the map's own normal, so the plane rotates even where depth is flat.",
+    InFlip = self:AddInput("Flip Normal Y", "NormalFlipY", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 0,
+        INPS_StatusText = "Inverts the green channel. Renderers disagree: flip when a horizontal top face reads as facing down.",
     })
-    InPerspective = self:AddInput("Perspective", "Perspective", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "How much the placement is scaled by anchor depth. Off by default: relative depth has no metric meaning, so enabling this magnifies by an arbitrary factor.",
-    })
-    InSlope = self:AddInput("Plane Slope", "PlaneSlope", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 1, INP_MinScale = 0, INP_MaxScale = 4,
-        INP_MinAllowed = 0, INP_MaxAllowed = 12,
-        INPS_StatusText = "Multiplies the fitted depth plane. Drives the occlusion residual only (not the tilt); raise it when the background should cut the placement harder.",
-    })
-    InFitRadius = self:AddInput("Fit Radius", "FitRadius", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0.65, INP_MinScale = 0.2, INP_MaxScale = 2,
-        INP_MinAllowed = 0.05, INP_MaxAllowed = 4,
-        INPS_StatusText = "Radius of the neighbourhood the anchor plane is fitted to, relative to Size. Small values follow a fold closely; large values flatten the plane.",
-    })
-    InWrap = self:AddInput("Wrap", "Wrap", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "0 = the footprint follows one anchor plane. 1 = it follows the surface normal at every pixel, so the placement compresses and stretches across a fold instead of staying flat.",
-    })    InTiltX = self:AddInput("Tilt X", "TiltX", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0, INP_MinScale = -60, INP_MaxScale = 60,
-        INP_MinAllowed = -85, INP_MaxAllowed = 85,
-        INPS_StatusText = "Extra sideways tilt in degrees, added to the surface normal at the anchor. Use it when the map cannot tell absolute tilt, e.g. a cube side seen nearly edge-on.",
-    })
-    InTiltY = self:AddInput("Tilt Y", "TiltY", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0, INP_MinScale = -60, INP_MaxScale = 60,
-        INP_MinAllowed = -85, INP_MaxAllowed = 85,
-        INPS_StatusText = "Extra up/down tilt in degrees, added to the surface normal at the anchor.",
-    })    InDepthInvert = self:AddInput("Depth Nearer = Brighter", "DepthInvert", {
-        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
-        INPS_StatusText = "On: brighter depth channel is nearer to camera (Depth Anything / Mapshroom). Off: darker is nearer (inverted Z passes).",
-    })
-    InEncoding = self:AddInput("Map Encoding", "MapEncoding", {
-        LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
-        { CCS_AddString = "Linear / raw data (default)" },
-        { CCS_AddString = "sRGB PNG (decode to data)" },
-        INPS_StatusText = "Raw keeps the map values as loaded, which is what a data map needs. Choose the sRGB option only when the map passed through an sRGB transform and its values look lifted.",
-    })
-    self:EndControlNest()
-
-    self:BeginControlNest("Occlusion", "OcclusionNest", true, {})
-    InOcclusion = self:AddInput("Occlusion", "Occlusion", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 1, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "How strongly surface geometry standing in front of the fitted plane hides the placement.",
-    })
-    InOccSoft = self:AddInput("Occlusion Softness", "OccSoftness", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0.06, INP_MinScale = 0, INP_MaxScale = 0.4,
-        INP_MinAllowed = 0.001, INP_MaxAllowed = 1,
-        INPS_StatusText = "Depth width of the occlusion transition, in relative-depth units.",
-    })
-    InShadow = self:AddInput("Contact Shadow", "ContactShadow", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0.35, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "Darkens the background in a band hugging the placement's silhouette where the surface sits behind the plane.",
-    })
-    InShadowWidth = self:AddInput("Shadow Width", "ShadowWidth", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 0.3, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0.001, INP_MaxAllowed = 2,
-        INPS_StatusText = "Thickness of the contact shadow band, as a fraction of the placement's half size.",
-    })
-    self:EndControlNest()
 
     self:BeginControlNest("Merge", "MergeNest", true, {})
     InBlend = self:AddInput("Blend", "BlendMode", {
         LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
         { CCS_AddString = "Normal" },
         { CCS_AddString = "Add" },
+        { CCS_AddString = "Subtract" },
         { CCS_AddString = "Multiply" },
-        INPS_StatusText = "Normal overwrites the background; Add and Multiply lighten or darken it by the placed image.",
+        { CCS_AddString = "Screen" },
+        { CCS_AddString = "Overlay" },
+        { CCS_AddString = "Soft Light" },
+        { CCS_AddString = "Hard Light" },
+        { CCS_AddString = "Color Dodge" },
+        { CCS_AddString = "Color Burn" },
+        { CCS_AddString = "Darken" },
+        { CCS_AddString = "Lighten" },
+        { CCS_AddString = "Difference" },
+        { CCS_AddString = "Exclusion" },
+        { CCS_AddString = "Hue" },
+        { CCS_AddString = "Saturation" },
+        { CCS_AddString = "Color" },
+        { CCS_AddString = "Luminosity" },
+        { CCS_AddString = "Vivid Light" },
+        { CCS_AddString = "Linear Light" },
+        { CCS_AddString = "Pin Light" },
+        { CCS_AddString = "Hard Mix" },
+        { CCS_AddString = "Divide" },
+        INPS_StatusText = "How the placement combines with the background. Lighting and shadow are not this operator's job: they come from the blend and the comp.",
     })
     InOpacity = self:AddInput("Opacity", "OpacityAmount", {
         LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
         INP_Default = 1, INP_MinScale = 0, INP_MaxScale = 1,
         INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "Overall opacity of the placement, on top of alpha, coverage and occlusion.",
-    })
-    InLightAdapt = self:AddInput("Light Adapt", "LightAdapt", {
-        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
-        INP_Default = 1, INP_MinScale = 0, INP_MaxScale = 1,
-        INP_MinAllowed = 0, INP_MaxAllowed = 1,
-        INPS_StatusText = "Multiplies the placement by the background's local shading so it picks up the scene light.",
+        INPS_StatusText = "Overall opacity of the placement, on top of the sticker's alpha.",
     })
     self:EndControlNest()
 
     InView = self:AddInput("View", "View", {
         LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
         { CCS_AddString = "Result" },
-        { CCS_AddString = "Surface normal" },
-        { CCS_AddString = "Depth" },
-        { CCS_AddString = "Occlusion" },
-        { CCS_AddString = "FG coordinates" },
-        { CCS_AddString = "Contact shadow" },
-        INPS_StatusText = "Diagnostic views of the derived surface. Result is the merged image.",
+        { CCS_AddString = "Tangent frame" },
+        INPS_StatusText = "Result is the placement. Tangent frame paints the sticker's axes, to check that the plane sits on the surface.",
     })
 
     OutImage = self:AddOutput("Output", "Output", { LINKID_DataType = "Image", LINK_Main = 1 })
@@ -235,9 +146,139 @@ local function smoothstep(a, b, x)
     return t * t * (3 - 2 * t)
 end
 
-local function srgbToData(v)
-    if v <= 0.04045 then return v / 12.92 end
-    return ((v + 0.055) / 1.055) ^ 2.4
+-- Runs inside MultiProcessPixels: copies the background natively, so the Lua loop
+-- below only has to touch the pixels the sticker can reach.
+local function passthrough(x, y, p)
+    return p
+end
+
+-- Blend modes, matching Fusion's Merge apply modes. Separable ones operate per
+-- channel; Hue/Saturation/Color/Luminosity use the standard non-separable
+-- construction (luminance 0.3/0.59/0.11, clip and set-lum as in Photoshop).
+local function lum709(r, g, b)
+    return 0.3 * r + 0.59 * g + 0.11 * b
+end
+
+local function clipColor(r, g, b)
+    local l = lum709(r, g, b)
+    local lo = math.min(r, g, b)
+    local hi = math.max(r, g, b)
+    if lo < 0 then
+        local d = l - lo
+        if d > 1e-9 then
+            r, g, b = l + (r - l) * l / d, l + (g - l) * l / d, l + (b - l) * l / d
+        end
+    end
+    if hi > 1 then
+        local d = hi - l
+        if d > 1e-9 then
+            r, g, b = l + (r - l) * (1 - l) / d, l + (g - l) * (1 - l) / d, l + (b - l) * (1 - l) / d
+        end
+    end
+    return r, g, b
+end
+
+local function setLum(r, g, b, l)
+    local d = l - lum709(r, g, b)
+    return clipColor(r + d, g + d, b + d)
+end
+
+local function satOf(r, g, b)
+    return math.max(r, g, b) - math.min(r, g, b)
+end
+
+local function setSat(r, g, b, s)
+    local lo = math.min(r, g, b)
+    local hi = math.max(r, g, b)
+    if hi - lo > 1e-9 then
+        local k = s / (hi - lo)
+        return (r - lo) * k, (g - lo) * k, (b - lo) * k
+    end
+    return 0, 0, 0
+end
+
+local function sep(mode, b, f)
+    if mode == 2 then
+        return b + f
+    elseif mode == 3 then
+        return b - f
+    elseif mode == 4 then
+        return b * f
+    elseif mode == 5 then
+        return 1 - (1 - b) * (1 - f)
+    elseif mode == 6 then
+        if b < 0.5 then return 2 * b * f end
+        return 1 - 2 * (1 - b) * (1 - f)
+    elseif mode == 7 then
+        if f <= 0.5 then
+            return b - (1 - 2 * f) * b * (1 - b)
+        end
+        local d = b <= 0.25 and ((16 * b - 12) * b + 4) * b or math.sqrt(math.max(0, b))
+        return b + (2 * f - 1) * (d - b)
+    elseif mode == 8 then
+        if f < 0.5 then return 2 * f * b end
+        return 1 - 2 * (1 - f) * (1 - b)
+    elseif mode == 9 then
+        if f >= 1 then return 1 end
+        return math.min(1, b / (1 - f))
+    elseif mode == 10 then
+        if f <= 0 then return 0 end
+        return 1 - math.min(1, (1 - b) / f)
+    elseif mode == 11 then
+        return math.min(b, f)
+    elseif mode == 12 then
+        return math.max(b, f)
+    elseif mode == 13 then
+        return math.abs(b - f)
+    elseif mode == 14 then
+        return b + f - 2 * b * f
+    elseif mode == 19 then
+        if f <= 0.5 then
+            local ff = 2 * f
+            if ff <= 0 then return 0 end
+            return 1 - math.min(1, (1 - b) / ff)
+        end
+        local ff = 2 * f - 1
+        if ff >= 1 then return 1 end
+        return math.min(1, b / (1 - ff))
+    elseif mode == 20 then
+        return b + 2 * f - 1
+    elseif mode == 21 then
+        if f <= 0.5 then return math.min(b, 2 * f) end
+        return math.max(b, 2 * f - 1)
+    elseif mode == 22 then
+        local v
+        if f <= 0.5 then
+            local ff = 2 * f
+            v = ff <= 0 and 0 or 1 - math.min(1, (1 - b) / ff)
+        else
+            local ff = 2 * f - 1
+            v = ff >= 1 and 1 or math.min(1, b / (1 - ff))
+        end
+        return v >= 0.5 and 1 or 0
+    elseif mode == 23 then
+        if f <= 1e-6 then return 1 end
+        return math.min(1, b / f)
+    end
+    return f
+end
+
+local function blendRGB(mode, br, bgc, bb, fr, fg, fb)
+    if mode >= 15 and mode <= 18 then
+        -- W3C / Photoshop non-separable modes
+        local lb = lum709(br, bgc, bb)
+        if mode == 15 then
+            local hr, hg, hb = setSat(fr, fg, fb, satOf(br, bgc, bb))
+            return setLum(hr, hg, hb, lb)
+        elseif mode == 16 then
+            local sr, sg, sb = setSat(br, bgc, bb, satOf(fr, fg, fb))
+            return setLum(sr, sg, sb, lb)
+        elseif mode == 17 then
+            return setLum(fr, fg, fb, lb)
+        end
+        return setLum(br, bgc, bb, lum709(fr, fg, fb))
+    end
+    return sep(mode, br, fr), sep(mode, bgc, fg), sep(mode, bb, fb)
 end
 
 local function doProcess(req)
@@ -246,492 +287,172 @@ local function doProcess(req)
     bg:DownloadGPUMem(req)
 
     local fg = InForeground:GetValue(req)
-    local surf = InSurface:GetValue(req)
-    local msk = InMask:GetValue(req)
+    local nm = InNormal:GetValue(req)
     if fg then fg:DownloadGPUMem(req) end
-    if surf then surf:DownloadGPUMem(req) end
-    if msk then msk:DownloadGPUMem(req) end
+    if nm then nm:DownloadGPUMem(req) end
 
     local w, h = bg.Width, bg.Height
     if w < 1 or h < 1 then return end
     local t0 = os.clock()
 
-    -- parameters ---------------------------------------------------------
     local pos = InPosition:GetValue(req)
-    local ax, ay = clampf(pos.X, 0, 1), clampf(pos.Y, 0, 1)
+    local ax = clampf(pos.X, 0, 1)
+    local ay = clampf(pos.Y, 0, 1)
     local size = math.max(0.001, InSize:GetValue(req).Value)
     local aspect = math.max(0.01, InAspect:GetValue(req).Value)
     local rot = math.rad(InRotation:GetValue(req).Value)
-    local roundness = clampf(InRoundness:GetValue(req).Value, 0, 1)
     local edgeSoft = math.max(1e-4, InEdge:GetValue(req).Value)
-    local relief = InRelief:GetValue(req).Value
-    local perspAmt = clampf(InPerspective:GetValue(req).Value, 0, 1)
-    local tiltX = math.tan(math.rad(clampf(InTiltX:GetValue(req).Value, -85, 85)))
-    local tiltY = math.tan(math.rad(clampf(InTiltY:GetValue(req).Value, -85, 85)))
-    local slope = math.max(0, InSlope:GetValue(req).Value)
-    local fitRadius = math.max(0.05, InFitRadius:GetValue(req).Value) * size
-    local wrap = clampf(InWrap:GetValue(req).Value, 0, 1)
-    local occAmt = clampf(InOcclusion:GetValue(req).Value, 0, 1)
-    local occSoft = math.max(1e-4, InOccSoft:GetValue(req).Value)
-    local shadowAmt = clampf(InShadow:GetValue(req).Value, 0, 1)
-    local shadowW = math.max(1e-4, InShadowWidth:GetValue(req).Value)
+    local flipY = InFlip:GetValue(req).Value > 0.5
     local blendMode = math.floor(InBlend:GetValue(req).Value + 0.5)
     local opacity = clampf(InOpacity:GetValue(req).Value, 0, 1)
-    local lightAdapt = clampf(InLightAdapt:GetValue(req).Value, 0, 1)
     local view = math.floor(InView:GetValue(req).Value + 0.5)
-    local nearIsBright = InDepthInvert:GetValue(req).Value > 0.5
-    local rawMap = InEncoding:GetValue(req).Value < 0.5
-    local packedNormals = InSurfaceMode:GetValue(req).Value < 0.5
 
-    local step = 8
-    local gw = math.max(2, math.ceil(w / step) + 1)
-    local gh = math.max(2, math.ceil(h / step) + 1)
-    local GU, GV = {}, {}
-    for gx = 0, gw - 1 do GU[gx + 1] = gx / (gw - 1) end
-    for gy = 0, gh - 1 do GV[gy + 1] = gy / (gh - 1) end
-
-    local ND = {}
-    local NX, NY, NZ = {}, {}, {}
-    local gp = Pixel()
-
-    local function mapValue(v)
-        if rawMap then return clampf(v, 0, 1) end
-        return clampf(srgbToData(clampf(v, 0, 1)), 0, 1)
-    end
-
-    local aspectFrame = w / h
-
-    if surf then
-        local sw, sh = surf.Width, surf.Height
-        for gy = 0, gh - 1 do
-            -- Fusion rows are bottom-up; the grid follows the same convention.
-            local sy = math.max(0, math.min(sh - 1, math.floor(GV[gy + 1] * sh)))
-            local row = gy * gw
-            for gx = 0, gw - 1 do
-                local sx = math.min(sw - 1, math.floor(GU[gx + 1] * sw))
-                surf:GetPixel(sx, sy, gp)
-                local d = mapValue(gp.B)
-                if not nearIsBright then d = 1 - d end
-                local i = row + gx + 1
-                ND[i] = d
-                -- The packed RG normal is the authoritative surface orientation:
-                -- it tilts the placement even where depth is flat.
-                if packedNormals then
-                local nx = mapValue(gp.R) * 2 - 1
-                local ny = mapValue(gp.G) * 2 - 1
-                local nz = math.max(0, 1 - math.abs(nx) - math.abs(ny))
-                local nl = math.sqrt(nx * nx + ny * ny + nz * nz)
-                if nl < 1e-6 then nx, ny, nz, nl = 0, 0, 1, 1 end
-                NX[i] = nx / nl
-                NY[i] = ny / nl
-                NZ[i] = nz / nl
-                end
-            end
-        end
-    else
-        local lum = {}
-        for gy = 0, gh - 1 do
-            local py = math.max(0, math.min(h - 1, math.floor(GV[gy + 1] * h)))
-            local row = gy * gw
-            for gx = 0, gw - 1 do
-                local px = math.min(w - 1, math.floor(GU[gx + 1] * w))
-                bg:GetPixel(px, py, gp)
-                local a, r, g, b = gp.A, gp.R, gp.G, gp.B
-                if a > 0 and a < 1 then
-                    local inv = 1 / a
-                    r, g, b = r * inv, g * inv, b * inv
-                end
-                lum[row + gx + 1] = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            end
-        end
-        -- Blur at the placement's own scale, not at a fixed 24 px: a fold is bigger
-        -- than the noise, and a small blur only turns noise into a tilt.
-        local rad = math.max(1, math.min(24, math.floor(size * h / step)))
-        local tmp, height = {}, {}
-        for gy = 0, gh - 1 do
-            local row = gy * gw
-            for gx = 0, gw - 1 do
-                local s, n = 0, 0
-                for k = -rad, rad do
-                    local xx = gx + k
-                    if xx >= 0 and xx < gw then
-                        s = s + lum[row + xx + 1]
-                        n = n + 1
-                    end
-                end
-                tmp[row + gx + 1] = s / n
-            end
-        end
-        for gy = 0, gh - 1 do
-            for gx = 0, gw - 1 do
-                local s, n = 0, 0
-                for k = -rad, rad do
-                    local yy = gy + k
-                    if yy >= 0 and yy < gh then
-                        s = s + tmp[yy * gw + gx + 1]
-                        n = n + 1
-                    end
-                end
-                local i = gy * gw + gx + 1
-                height[i] = s / n
-                ND[i] = clampf(height[i], 0, 1)
-            end
-        end
-    end
-
-    -- Without packed normals (luminance fallback or a depth-only map) normals come
-    -- from the depth gradient. Relative depth has no metric slope, so the gradient
-    -- is auto-scaled: the mean gradient maps to tan(20 deg). Without this a big
-    -- planar face or a strong fold pushes every normal to the clamp and the
-    -- placement turns into a puddle.
-    if not (surf and packedNormals) then
-        local dXg = aspectFrame / (gw - 1)
-        local dYg = 1 / (gh - 1)
-        local BX, BY = {}, {}
-        local sumAbs, cnt = 0, 0
-        for gy = 0, gh - 1 do
-            for gx = 0, gw - 1 do
-                local i = gy * gw + gx + 1
-                local xm = gx > 0 and ND[i - 1] or ND[i]
-                local xp = gx < gw - 1 and ND[i + 1] or ND[i]
-                local ym = gy > 0 and ND[i - gw] or ND[i]
-                local yp = gy < gh - 1 and ND[i + gw] or ND[i]
-                local bx = (xp - xm) / (2 * dXg)
-                local by = (yp - ym) / (2 * dYg)
-                BX[i], BY[i] = bx, by
-                sumAbs = sumAbs + math.sqrt(bx * bx + by * by)
-                cnt = cnt + 1
-            end
-        end
-        local meanAbs = cnt > 0 and sumAbs / cnt or 0
-        local k = meanAbs > 1e-7 and (0.36 / meanAbs) or 1
-        -- A flat map (mean gradient ~0) must not explode; and a clamp keeps a
-        -- single hard edge from defining the whole surface.
-        if k > 40 then k = 40 elseif k < 0.02 then k = 0.02 end
-        for i = 1, gw * gh do
-            local bx = BX[i] * k
-            local by = BY[i] * k
-            local nl = math.sqrt(bx * bx + by * by + 1)
-            NX[i] = -bx / nl
-            NY[i] = -by / nl
-            NZ[i] = 1 / nl
-        end
-    end
-
-    -- anchor plane fit ---------------------------------------------------
-    -- d(x,y) = a + b*x + c*y, least squares over a disc of radius fitRadius.
-
-    -- Wrap uses the normal at each pixel instead of the anchor normal, so the
-    -- placement compresses on the near flank of a fold and stretches on the far one.
-    local SX, SY = NX, NY
-    if not (surf and packedNormals) then
-        -- Gradient normals are noisier; one box pass keeps them usable.
-        SX, SY = {}, {}
-        for gy = 0, gh - 1 do
-            for gx = 0, gw - 1 do
-                local sx, sy, n = 0, 0, 0
-                for dy = -1, 1 do
-                    local yy = gy + dy
-                    if yy >= 0 and yy < gh then
-                        for dx = -1, 1 do
-                            local xx = gx + dx
-                            if xx >= 0 and xx < gw then
-                                local j = yy * gw + xx + 1
-                                sx = sx + NX[j]
-                                sy = sy + NY[j]
-                                n = n + 1
-                            end
-                        end
-                    end
-                end
-                local i = gy * gw + gx + 1
-                SX[i] = sx / n
-                SY[i] = sy / n
-            end
-        end
-    end
-
-    local function normalAt(u, v)
-        local fx = clampf(u, 0, 1) * (gw - 1)
-        local fy = clampf(v, 0, 1) * (gh - 1)
+    -- surface normal at the picked point ----------------------------------
+    local nx, ny, nz = 0, 0, 1
+    if nm then
+        local px = Pixel()
+        local fx = clampf(ax, 0, 1) * (nm.Width - 1)
+        local fy = clampf(ay, 0, 1) * (nm.Height - 1)
         local ix = math.floor(fx)
         local iy = math.floor(fy)
-        if ix > gw - 2 then ix = gw - 2 end
-        if iy > gh - 2 then iy = gh - 2 end
+        if ix > nm.Width - 2 then ix = math.max(0, nm.Width - 2) end
+        if iy > nm.Height - 2 then iy = math.max(0, nm.Height - 2) end
         local tx, ty = fx - ix, fy - iy
-        local i0 = iy * gw + ix + 1
-        local i1 = i0 + 1
-        local i2 = i0 + gw
-        local i3 = i2 + 1
-        local nx = (SX[i0] * (1 - tx) + SX[i1] * tx) * (1 - ty) + (SX[i2] * (1 - tx) + SX[i3] * tx) * ty
-        local ny = (SY[i0] * (1 - tx) + SY[i1] * tx) * (1 - ty) + (SY[i2] * (1 - tx) + SY[i3] * tx) * ty
-        local nz = (NZ[i0] * (1 - tx) + NZ[i1] * tx) * (1 - ty) + (NZ[i2] * (1 - tx) + NZ[i3] * tx) * ty
-        return nx, ny, nz
-    end
-
-    local sx, sy, sd, sxx, syy, sxy, sxd, syd = 0, 0, 0, 0, 0, 0, 0, 0
-    local nfit = 0
-    local r2 = fitRadius * fitRadius
-    for gy = 0, gh - 1 do
-        local Y = GV[gy + 1] - ay
-        for gx = 0, gw - 1 do
-            local X = (GU[gx + 1] - ax) * aspectFrame
-            if X * X + Y * Y <= r2 then
-                local d = ND[gy * gw + gx + 1]
-                sx = sx + X; sy = sy + Y; sd = sd + d
-                sxx = sxx + X * X; syy = syy + Y * Y; sxy = sxy + X * Y
-                sxd = sxd + X * d; syd = syd + Y * d
-                nfit = nfit + 1
+        local sx, sy, sz = 0, 0, 0
+        for j = 0, 1 do
+            for i = 0, 1 do
+                nm:GetPixel(ix + i, iy + j, px)
+                local wgt = (i == 0 and 1 - tx or tx) * (j == 0 and 1 - ty or ty)
+                sx = sx + px.R * wgt
+                sy = sy + px.G * wgt
+                sz = sz + px.B * wgt
             end
         end
-    end
-
-    local a0, b0, c0 = 0, 0, 0
-    local det3 = 0
-    if nfit >= 6 then
-        local n = nfit
-        -- 3x3 system: [n sx sy; sx sxx sxy; sy sxy syy] [a b c]' = [sd sxd syd]'
-        det3 = n * (sxx * syy - sxy * sxy)
-             - sx * (sx * syy - sxy * sy)
-             + sy * (sx * sxy - sxx * sy)
-        if math.abs(det3) > 1e-9 then
-            local d1 = sd * (sxx * syy - sxy * sxy)
-                     - sx * (sxd * syy - sxy * syd)
-                     + sy * (sxd * sxy - sxx * syd)
-            local d2 = n * (sxd * syy - syd * sxy)
-                     - sd * (sx * syy - sxy * sy)
-                     + sy * (sx * syd - sxd * sy)
-            local d3 = n * (sxx * syd - sxd * sxy)
-                     - sx * (sx * syd - sxd * sy)
-                     + sd * (sx * sxy - sxx * sy)
-            a0, b0, c0 = d1 / det3, d2 / det3, d3 / det3
+        nx, ny, nz = sx * 2 - 1, sy * 2 - 1, sz * 2 - 1
+        if flipY then ny = -ny end
+        local nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if nl < 1e-6 then
+            nx, ny, nz = 0, 0, 1
         else
-            a0 = sd / nfit
+            nx, ny, nz = nx / nl, ny / nl, nz / nl
         end
-    else
-        a0 = 0.5
+        -- a normal pointing away from the camera cannot be seen; keep the plane
+        if nz < 0 then nx, ny, nz = -nx, -ny, -nz end
     end
 
-    -- fall back to the anchor texel depth if the fit produced nonsense
-    if a0 < -1 or a0 > 2 then a0 = 0.5; b0, c0 = 0, 0 end
-    b0 = b0 * slope
-    c0 = c0 * slope
-
-    local anx, any, anz = normalAt(ax, ay)
-    local nzx, nzy, nzz = (anx + tiltX) * relief, (any + tiltY) * relief, anz
-    local nlen = math.sqrt(nzx * nzx + nzy * nzy + nzz * nzz)
-    nzx, nzy, nzz = nzx / nlen * relief, nzy / nlen * relief, nzz / nlen
-    local tl = math.sqrt(nzx * nzx + nzz * nzz)
-    local txx, txy = nzz / tl, 0
-    local tyx = -nzx * nzy / tl
-    local tyy = (nzz * nzz + nzx * nzx) / tl
-    local det = txx * tyy - tyx * txy
-    if math.abs(det) < 1e-5 then det = 1e-5 end
-
-    local persp = 1
-    if perspAmt > 0 then
-        persp = 1 + (((0.5 + 1.5 * a0) / 1.25) - 1) * perspAmt
+    -- orthonormal tangents: ty follows camera up, tx completes the frame -----
+    local upx, upy, upz = 0, 1, 0
+    local d = upx * nx + upy * ny + upz * nz
+    local ux, uy, uz = upx - d * nx, upy - d * ny, upz - d * nz
+    local ul = math.sqrt(ux * ux + uy * uy + uz * uz)
+    if ul < 0.05 then
+        -- degenerates on a face pointing straight up: use the view axis instead
+        upx, upy, upz = 0, 0, -1
+        d = upx * nx + upy * ny + upz * nz
+        ux, uy, uz = upx - d * nx, upy - d * ny, upz - d * nz
+        ul = math.sqrt(ux * ux + uy * uy + uz * uz)
+        if ul < 1e-4 then ux, uy, uz, ul = 0, 1, 0, 1 end
     end
-    if persp < 0.05 then persp = 0.05 end
+    local tyx, tyy, tyz = ux / ul, uy / ul, uz / ul
+    -- tx = ty x n, unit because ty and n are unit and perpendicular
+    local txx = tyy * nz - tyz * ny
+    local txy = tyz * nx - tyx * nz
+    local mx, my = txx, txy
+
+    -- 2x2 matrix [[mx, tyx], [my, tyy]] maps plane coords to screen delta.
+    local det = mx * tyy - tyx * my
+    if math.abs(det) < 1e-6 then det = 1e-6 end
 
     local cs, sn = math.cos(rot), math.sin(rot)
     local invSize = 1 / size
     local invSizeY = 1 / (size * aspect)
-    local shadowScale = 1 + shadowW
-    local shadowReach = shadowScale
+    local aspectFrame = w / h
 
     local fgW, fgH = 0, 0
     if fg then fgW, fgH = fg.Width, fg.Height end
-    local pf = Pixel()
-
-    local function fgAlpha(u, v)
-        if fgW < 1 or fgH < 1 then return 0 end
-        if u < 0 or u > 1 or v < 0 or v > 1 then return 0 end
-        local fx = u * (fgW - 1)
-        local fy = v * (fgH - 1)
-        local ix = math.floor(fx)
-        local iy = math.floor(fy)
-        if ix > fgW - 2 then ix = math.max(0, fgW - 2) end
-        if iy > fgH - 2 then iy = math.max(0, fgH - 2) end
-        local tx, ty = fx - ix, fy - iy
-        local a = 0
-        for j = 0, 1 do
-            for i = 0, 1 do
-                fg:GetPixel(ix + i, iy + j, pf)
-                a = a + pf.A * (i == 0 and 1 - tx or tx) * (j == 0 and 1 - ty or ty)
-            end
-        end
-        return a
-    end
 
     local dst = Image({ IMG_Like = bg })
     local pb = Pixel()
+    local pf = Pixel()
 
-    local function gridSample(arr, u, v)
-        local fx = clampf(u, 0, 1) * (gw - 1)
-        local fy = clampf(v, 0, 1) * (gh - 1)
-        local ix = math.floor(fx)
-        local iy = math.floor(fy)
-        if ix > gw - 2 then ix = gw - 2 end
-        if iy > gh - 2 then iy = gh - 2 end
-        local tx, ty = fx - ix, fy - iy
-        local i0 = iy * gw + ix + 1
-        local i1 = i0 + 1
-        local i2 = i0 + gw
-        local i3 = i2 + 1
-        return (arr[i0] * (1 - tx) + arr[i1] * tx) * (1 - ty) + (arr[i2] * (1 - tx) + arr[i3] * tx) * ty
-    end
+    local copied = pcall(function()
+        dst:MultiProcessPixels(nil, {}, 0, 0, w, h, bg, passthrough)
+    end)
 
-    local function gridAt(u, v)
-        return gridSample(ND, u, v)
+    local reach = (size * h * 0.5) / math.max(0.2, math.abs(math.min(mx, tyy))) * (1 + edgeSoft * 2) + 6
+    reach = math.min(reach, size * h * 4 + 8)
+    local x0, x1, y0, y1 = 0, w - 1, 0, h - 1
+    if copied and view == 0 then
+        x0 = math.max(0, math.floor(ax * w - reach))
+        x1 = math.min(w - 1, math.ceil(ax * w + reach))
+        y0 = math.max(0, math.floor(ay * h - reach))
+        y1 = math.min(h - 1, math.ceil(ay * h + reach))
     end
 
     local invW, invH = 1 / w, 1 / h
 
-    for y = 0, h - 1 do
+    for y = y0, y1 do
         local v = (y + 0.5) * invH
-        local vu = v
-        local ey = vu - ay
-        for x = 0, w - 1 do
+        local ey = v - ay
+        for x = x0, x1 do
             bg:GetPixel(x, y, pb)
             local u = (x + 0.5) * invW
             local ex = (u - ax) * aspectFrame
 
-            local dx, dy = ex / persp, ey / persp
+            -- invert the tangent frame: screen delta -> plane coordinates
+            local a = (tyy * ex - tyx * ey) / det
+            local b = (-my * ex + mx * ey) / det
+            local ra = cs * a - sn * b
+            local rb = sn * a + cs * b
+            local fu = 0.5 + ra * invSize
+            local fv = 0.5 + rb * invSizeY
 
-            -- The silhouette always comes from the anchor plane: a quad that does
-            -- not tear. Wrap only moves the texture inside it.
-            local aqx = (tyy * dx - tyx * dy) / det
-            local aqy = (-txy * dx + txx * dy) / det
-            local arx = cs * aqx - sn * aqy
-            local ary = sn * aqx + cs * aqy
-            local afu = 0.5 + arx * invSize
-            local afv = 0.5 + ary * invSizeY
-            local adu = math.abs(afu - 0.5) * 2
-            local adv = math.abs(afv - 0.5) * 2
-            local aEdge = adu > adv and adu or adv
-            local aCirc = 2 * math.sqrt((afu - 0.5) ^ 2 + (afv - 0.5) ^ 2)
-            local dist = aEdge * (1 - roundness) + aCirc * roundness
+            local du = math.abs(fu - 0.5) * 2
+            local dv = math.abs(fv - 0.5) * 2
+            local dist = du > dv and du or dv
             local coverage = 1 - smoothstep(1 - edgeSoft, 1, dist)
-
-            local fu, fv = afu, afv
-            if wrap > 0 and coverage > 0.0001 then
-                local lnx, lny, lnz = normalAt(u, v)
-                lnx, lny = lnx * relief, lny * relief
-                local nl = math.sqrt(lnx * lnx + lny * lny + lnz * lnz)
-                local wnx, wny, wnz = lnx / nl, lny / nl, lnz / nl
-                local wl = math.sqrt(wnx * wnx + wnz * wnz)
-                local wyy = wl
-                local wxx = wnz / wl
-                if wxx < 0.35 then wxx = 0.35 end
-                local wyx = -wnx * wny / wl
-                local lqy = dy / wyy
-                local lqx = (dx - wyx * lqy) / wxx
-                -- Bound the warp so a fold cannot drag the texture arbitrarily far,
-                -- and hold the sprite's own edge on the plane so its border cannot tear.
-                local ddx, ddy = lqx - aqx, lqy - aqy
-                local dmax = 0.30
-                local dlen = math.sqrt(ddx * ddx + ddy * ddy)
-                if dlen > dmax then
-                    local k = dmax / dlen
-                    ddx, ddy = ddx * k, ddy * k
-                end
-                local fade = 1 - smoothstep(0.70, 1.0, dist)
-                ddx, ddy = ddx * fade, ddy * fade
-                local rx = cs * (aqx + ddx * wrap) - sn * (aqy + ddy * wrap)
-                local ry = sn * (aqx + ddx * wrap) + cs * (aqy + ddy * wrap)
-                fu = clampf(0.5 + rx * invSize, 0, 1)
-                fv = clampf(0.5 + ry * invSizeY, 0, 1)
-            end
 
             local outR, outG, outB = pb.R, pb.G, pb.B
 
-            if coverage > 0.001 or view > 0 then
-                local nd = gridAt(u, v)
-                local resid = nd - (a0 + b0 * ex + c0 * ey)
-                local occ = 0
-                if occAmt > 0 then occ = smoothstep(0, occSoft, resid) * occAmt end
-
-                if coverage > 0.001 and fg then
-                    local fr, fgc, fb, fa = 0, 0, 0, 0
-                    local fxq = fu * (fgW - 1)
-                    local fyq = fv * (fgH - 1)
-                    local ix = math.floor(fxq)
-                    local iy = math.floor(fyq)
-                    if ix >= 0 and iy >= 0 and ix < fgW - 1 and iy < fgH - 1 then
-                        local tx, ty = fxq - ix, fyq - iy
-                        for j = 0, 1 do
-                            for i = 0, 1 do
-                                fg:GetPixel(ix + i, iy + j, pf)
-                                local wgt = (i == 0 and 1 - tx or tx) * (j == 0 and 1 - ty or ty)
-                                fr = fr + pf.R * wgt
-                                fgc = fgc + pf.G * wgt
-                                fb = fb + pf.B * wgt
-                                fa = fa + pf.A * wgt
-                            end
-                        end
-                    end
-                    if fa > 0 and fa < 1 then
-                        local inv = 1 / fa
-                        fr, fgc, fb = fr * inv, fgc * inv, fb * inv
-                    end
-                    local maskA = 1
-                    if msk then
-                        local mx = math.min(msk.Width - 1, math.floor(u * msk.Width))
-                        local my = math.min(msk.Height - 1, math.floor(v * msk.Height))
-                        msk:GetPixel(mx, my, pf)
-                        maskA = pf.A
-                    end
-                    local shade = clampf((0.2126 * pb.R + 0.7152 * pb.G + 0.0722 * pb.B) * 1.55 + 0.16, 0.16, 1.45)
-                    local light = 1 + (shade - 1) * lightAdapt
-                    fr, fgc, fb = fr * light, fgc * light, fb * light
-                    local vis = clampf(coverage * fa * opacity * maskA * (1 - occ), 0, 1)
-                    if vis > 0.0001 then
-                        if blendMode == 1 then
-                            outR, outG, outB = pb.R + fr * vis, pb.G + fgc * vis, pb.B + fb * vis
-                        elseif blendMode == 2 then
-                            outR = pb.R * (1 - vis + vis * fr)
-                            outG = pb.G * (1 - vis + vis * fgc)
-                            outB = pb.B * (1 - vis + vis * fb)
-                        else
-                            outR = pb.R * (1 - vis) + fr * vis
-                            outG = pb.G * (1 - vis) + fgc * vis
-                            outB = pb.B * (1 - vis) + fb * vis
+            if coverage > 0.0001 and fg then
+                local fxq = fu * (fgW - 1)
+                local fyq = fv * (fgH - 1)
+                local ix = math.floor(fxq)
+                local iy = math.floor(fyq)
+                local fr, fgc, fb, fa = 0, 0, 0, 0
+                if ix >= 0 and iy >= 0 and ix < fgW - 1 and iy < fgH - 1 then
+                    local tx, ty = fxq - ix, fyq - iy
+                    for j = 0, 1 do
+                        for i = 0, 1 do
+                            fg:GetPixel(ix + i, iy + j, pf)
+                            local wgt = (i == 0 and 1 - tx or tx) * (j == 0 and 1 - ty or ty)
+                            fr = fr + pf.R * wgt
+                            fgc = fgc + pf.G * wgt
+                            fb = fb + pf.B * wgt
+                            fa = fa + pf.A * wgt
                         end
                     end
                 end
-
-                -- contact shadow: silhouette band of an expanded placement
-                if shadowAmt > 0 and dist > 0.5 then
-                    local band = 0
-                    local eu = 0.5 + (fu - 0.5) * shadowScale
-                    local ev = 0.5 + (fv - 0.5) * shadowScale
-                    if coverage <= 0.001 then
-                        band = fgAlpha(eu, ev)
-                    elseif dist > 0.8 then
-                        band = fgAlpha(eu, ev) - fgAlpha(fu, fv)
-                    end
-                    if band > 0 then
-                        local sh = shadowAmt * clampf(band, 0, 1) * smoothstep(0, 0.03, -resid)
-                        outR, outG, outB = outR * (1 - sh), outG * (1 - sh), outB * (1 - sh)
-                    end
+                if fa > 0 and fa < 1 then
+                    local inv = 1 / fa
+                    fr, fgc, fb = fr * inv, fgc * inv, fb * inv
                 end
-
-                if view == 1 then
-                    local vnx, vny, vnz = normalAt(u, v)
-                    outR = vnx * 0.5 + 0.5
-                    outG = vny * 0.5 + 0.5
-                    outB = vnz * 0.5 + 0.5
-                elseif view == 2 then
-                    outR, outG, outB = nd, nd, nd
-                elseif view == 3 then
-                    local o = 1 - occ
-                    outR, outG, outB = o, o, o
-                elseif view == 4 then
-                    outR, outG, outB = clampf(fu, 0, 1), clampf(fv, 0, 1), 0
-                elseif view == 5 then
-                    outR, outG, outB = coverage, coverage, coverage
+                local vis = clampf(coverage * fa * opacity, 0, 1)
+                if vis > 0.0001 then
+                    local br2, bg2, bb2 = blendRGB(blendMode + 1, pb.R, pb.G, pb.B, fr, fgc, fb)
+                    outR = pb.R * (1 - vis) + br2 * vis
+                    outG = pb.G * (1 - vis) + bg2 * vis
+                    outB = pb.B * (1 - vis) + bb2 * vis
                 end
+            end
+
+            if view == 1 then
+                -- paint the two tangent axes: red along u, green along v
+                local axisU = math.min(du, 0.02)
+                local axisV = math.min(dv, 0.02)
+                outR = clampf(pb.R + (1 - smoothstep(0, 0.02, axisU * 0.5 + axisV)) * 0.8, 0, 1)
+                outG = clampf(pb.G + (1 - smoothstep(0, 0.02, axisV * 0.5 + axisU)) * 0.8, 0, 1)
+                outB = pb.B
             end
 
             pb.R, pb.G, pb.B = outR, outG, outB
@@ -740,35 +461,18 @@ local function doProcess(req)
     end
 
     local dt = os.clock() - t0
-    if dt > 2.0 then logline(string.format("frame %dx%d %.2fs", w, h, dt)) end
+    if dt > 1.0 then logline(string.format("frame %dx%d %.2fs box %d..%d x %d..%d copy=%s", w, h, dt, x0, x1, y0, y1, tostring(copied))) end
     OutImage:Set(req, dst)
 end
 
 function Process(req)
     local ok, err = pcall(doProcess, req)
     if not ok then
-        print(TAG .. tostring(err))
         logline("ERROR " .. tostring(err))
         local bg = InBackground:GetValue(req)
         if bg then OutImage:Set(req, bg) end
     end
 end
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

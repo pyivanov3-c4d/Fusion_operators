@@ -1,113 +1,76 @@
-﻿# PSN_SurfaceMerge 0.6
+﻿# PSN_SurfaceMerge 1.1
 
-Surface-aware place/merge. A second image is laid onto an estimated surface: the placement
-plane rotates by the surface normal at its anchor, can bend across a fold, is occluded by
-geometry in front of it, picks up the background's shading, and casts a short contact shadow.
+Places a sticker **tangentially** on a picked point of a surface. The sticker's plane is the
+tangent plane of the surface there; its two axes run along the two orthogonal tangents, so the
+placement is foreshortened exactly as the plane is and its axes stay perpendicular in 3D.
 
-Screen-space cheat, not a camera solve.
+No shadow, no lighting, no occlusion â€” those belong to the blend and the comp.
 
-## Three ways to feed it, no map required
-
-| Connected | Tilt comes from | Occlusion from | Quality |
-| --- | --- | --- | --- |
-| nothing | background luminance, blurred at the placement's own scale, gradient -> normal | luma as pseudo-depth | works on visibly shaded fabric, walls, product shots; flat lighting degrades it to a flat placement with light adapt and shadow only |
-| depth image (`Surface Type = Depth only`) | gradient of that depth | the depth itself | correct geometry, one extra render/tab needed |
-| packed RGBA (`Surface Type = Packed`) | the map's own normals | the map's depth | best; tilt is exact, no gradient guesswork |
-
-So a normal map is never required. Depth alone is enough, and nothing at all is still a usable mode.
 ## Inputs
 
 | Input | Required | Meaning |
 | --- | --- | --- |
-| Background | yes | The scene the image is placed into. |
-| Foreground | yes | The image being placed. Premultiplied alpha. |
-| Surface | no | Surface map. Packed RGBA by default (R,G = folded normal, B = relative depth). Or a plain depth image with `Surface Type = Depth only`. Unconnected: geometry from background luminance. |
-| Mask | no | Matte multiplied into the placement. Only alpha is used. |
+| Background | yes | The scene. |
+| Sticker | yes | The image placed. Premultiplied alpha. |
+| Normal | no | Normal map, R,G,B = x,y,z. Unconnected: the plane is parallel to the screen (flat placement). |
 
 ## Controls
 
-**Placement** â€” `Position`, `Size`, `Aspect`, `Rotation`, `Roundness`, `Edge Softness`.
+`Position` (pick), `Size` (width in the plane, fraction of frame height), `Aspect`, `Rotation`
+(spin inside the plane), `Edge Softness`, `Flip Normal Y`, `Blend`, `Opacity`, `View`
+(Result / Tangent frame).
 
-**Surface** â€” `Relief` (scale on the anchor normal), `Perspective`, `Plane Slope` (occlusion
-only), `Fit Radius` (occlusion fit), `Wrap`, `Surface Type`, `Depth Nearer = Brighter`,
-`Map Encoding`.
-
-**Occlusion** â€” `Occlusion`, `Occlusion Softness`, `Contact Shadow`, `Shadow Width`.
-
-**Merge** â€” `Blend`, `Opacity`, `Light Adapt`.
-
-**View** â€” Result, Surface normal, Depth, Occlusion, FG coordinates, Contact shadow.
+**Blend modes** (23, Fusion Merge order): Normal, Add, Subtract, Multiply, Screen, Overlay,
+Soft Light, Hard Light, Color Dodge, Color Burn, Darken, Lighten, Difference, Exclusion, Hue,
+Saturation, Color, Luminosity, Vivid Light, Linear Light, Pin Light, Hard Mix, Divide.
 
 ## How it works
 
-1. **Geometry grid.** Depth sampled on an 8 px grid (Surface map, or background luminance).
-2. **Normals.**
-   - Packed map: R,G decoded as a folded normal (`nz = 1 - |nx| - |ny|`, normalised). This is
-     the authoritative orientation and is what rotates the placement plane.
-   - Depth-only map or luminance fallback: normals from the depth gradient, slope clamped.
-3. **Tilt.** The plane's normal is sampled **at the anchor** and scaled by `Relief`; the
-   footprint is projected through its tangent frame. A flat depth with a tilted normal still
-   tilts the placement.
-4. **Perspective.** `(0.5 + 1.5*depth) / 1.25` mixed by `Perspective`, from the anchor depth.
-5. **Occlusion.** A depth plane `d = a + b*x + c*y` is least-squares fitted over a disc around
-   the anchor (depth only, normals play no part). `resid = surfaceDepth - planeDepth`; where
-   the surface is in front, the placement is hidden. `Plane Slope` scales the fit.
-6. **Wrap.** With `Wrap > 0` the footprint uses the normal at each pixel, bounded to 22 % of the
-   placement and faded out near the silhouette, so the texture bends while the outline stays a
-   clean quad.
-7. **Contact shadow.** Foreground alpha resampled through an expanded placement; the difference
-   is a silhouette band, darkened where the surface sits behind the plane.
-8. **Light adaptation.** Multiplied by `clamp(luma*1.55 + 0.16, .16, 1.45)`.
+1. Sample the normal map bilinearly **at the picked point** (not precomputed over the frame).
+2. Build an orthonormal tangent frame: `ty` = camera up projected onto the plane (falls back to
+   the view axis on a face pointing straight up), `tx = ty Ã— n`.
+3. Project the plane: the 2Ã—2 matrix `[[tx.x, ty.x], [tx.y, ty.y]]` maps plane coordinates to
+   screen delta. Its **full inverse** turns a screen delta back into plane coordinates â€” this is
+   the part that must not be simplified. Dropping `ty.x` (a shortcut I had in earlier versions)
+   breaks orthogonality and the placement slides off the tangent.
+4. `Rotation` is applied in plane coordinates, then the sticker is sampled with bilinear
+   filtering; a square-footprint coverage with a soft edge gates it.
+5. Blend and opacity.
 
 ## Limits
 
-- **The depth channel is relative, not metric.** Its gradient is *not* a slope. Never derive tilt
-  from it: at the test anchor the depth fit implied 51Â°, the map's own normal said 13Â°.
-- **Depth cannot tell absolute tilt.** A side face seen nearly edge-on needs `Tilt X` (~60° for
-  the cube side in the test plate); depth-derived normals only order the shape.
-- **Wrap is per-pixel, not integrated.** Arc length is not conserved; at 1.0 a sharp fold smears
-  and can notch the sprite border. Defaults to 0.
-- **The silhouette is always the anchor quad.** Only the texture bends; a fold cuts the
-  placement through occlusion rather than deforming its outline.
-- **Luma fallback is shading, not geometry.** Fine on fabric, walls, product shots; fails on
-  matte, evenly lit surfaces.
-- **Cost.** ~0.5â€“0.9 s per 1920Ã—1080 frame; `Wrap` adds ~10 %.
+- **Linear tangent projection, not a 3D card.** Exact for the plane at the anchor; over a large
+  placement the missing perspective divide shows up as a slight size drift toward the edges.
+- **Needs a normal map for automatic orientation.** Depth alone cannot give an absolute angle
+  (relative depth is affine-invariant), which is why there is no depth input any more.
+- **Flat when the Normal input is empty** â€” by design.
+- **Cost.** The operator adds ~1 s over a bypass at 4000Ã—4000. Measured: bypass render 20.1 s,
+  with the operator 21.2 s. The 20 s is Fusion writing a 16-megapixel PNG, not the node. At
+  736Ã—736 a full render is 0.2 s.
 
 ## Validation
 
-- **Normal-driven tilt:** a synthetic map with constant depth (B = 0.5) and a 45Â° normal in X
-  narrows the placement by cos 45Â° = 0.71, with nothing in the depth channel to fit. Proves the
-  plane rotates by the normal, not by depth.
-- **Consistency check:** at the anchor of the cloth plate the packed normal reads 13.3Â°; the
-  depth-plane fit implied 51.2Â° â€” hence the rule above.
-- **Depth-only mode:** the same depth channel supplied as a grayscale image with
-  `Surface Type = Depth only` produces gradient normals and renders without artifacts.
-- No-map mode renders at the same placement; the tilt is visibly smaller than the packed-map tilt, as expected for a shading guess.
-- Fitted occlusion plane still matches the numpy reference to 3 decimals.
-- **Side face placement:** the lower cube's right face lands correctly with `Tilt X = -60`,
-  size 0.22: the sticker compresses to the face and reads as applied to it, not pasted flat.
-- **Real footage** (concrete still life, 567x851, Depth Anything V2 Small run offline): packed
-  map gives an 8° tilt on the cube face and correct occlusion — a 0.30 placement behind the
-  sphere keeps only the ears that sit in front of the wall. Depth-only mode gives the same
-  placement; the no-map mode gives nearly the same result on that evenly lit face, which is
-  expected: the map buys occlusion and curved surfaces, not flat-lit planes.
-- Rendered without console errors: default, Surface, Mask, inverted depth, Wrap 0/0.5/1,
-  depth-only, no Surface.
+- Cube plate + hand-authored normal map: sticker lands on the right face foreshortened to
+  `cos(nx)`, on the top face lying down, with `Tilt` controls gone entirely.
+- Router plate (4000Ã—4000) + its ShN pass with `Flip Normal Y`: sticker lies on the top face;
+  whole frame intact, 21.2 s including the 4K save.
+- Tangent-frame view (`View = 1`) paints the two axes, which read perpendicular on the face.
+- **Blend modes**: each mode was rendered against a grey ramp with a 0.5 grey sticker. Every
+  response matches its formula: Add 0.753, Multiply 0.125, Screen 0.627, Overlay 0.251,
+  Hard Light 0.255, Color Dodge 0.506, Color Burn 0, Darken 0.251, Lighten 0.502,
+  Difference 0.251, Exclusion 0.502, Hue/Sat/Color 0.251, Luminosity 0.502, Hard Mix 0/1,
+  Divide 0.502 at a 0.251 ramp value.
+- Note: Fusion scripting cannot set a Merge tool's `ApplyMode` in this build (assignment reads
+  back None), so the modes were verified by response curve rather than by pixel equality with a
+  native Merge.
 
 ## Notes for the next session
 
-- Input IDs `BlendMode` / `OpacityAmount` are deliberate: an ID of `Blend` collides with
-  Fusion's built-in common control and silently reads 1.0.
+- `Image:Copy` in a fuse does **not** transfer pixels â€” a bbox-only loop therefore has to copy
+  the background with `MultiProcessPixels` first, or accept a full-frame pass.
+- Input IDs `BlendMode` / `OpacityAmount` avoid a collision with Fusion's built-in `Blend`.
 - Optional image inputs need `INP_Required = false, INP_Optional = true`.
 - Fusion rows are bottom-up.
-- `smoothstep(a, b, x)` here assumes `a < b`; a reversed range silently returns 0 or 1.
-- A packed map fed as a grayscale depth image yields garbage normals â€” that is why
-  `Surface Type` exists. Default is packed.
-- No icon PNG yet.
-- Fusion quirk: a Saver clip whose stem ends in digits (`occ_soft12.png`) is treated as a frame
-  sequence and renamed (`occ_soft01.png`). Name test renders without trailing digits.
-- Next real improvement: precomputed arc-length field (4 px cells) with a depth-continuity gate
-  inside the integration, replacing the per-pixel tangent frame for `Wrap`.
-
-
+- The previous full-featured version (depth input, occlusion, shadow, wrap, plane fit) is kept
+  as `PSN_SurfaceMerge_v08_full.fuse.bak` next to this file.
 
