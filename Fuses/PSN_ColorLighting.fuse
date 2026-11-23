@@ -1,0 +1,304 @@
+-- PSN_ColorLighting 1.0
+-- Photoshop 28 "Light" adjustment layer (Exposure, Contrast, Highlights, Shadows,
+-- Whites, Blacks) for Fusion. The six sliders are reproduced from the measured
+-- response of Photoshop 28.0.0's own Light layer: 36 single-slider renders of a
+-- neutral ramp plus interaction renders, composed as one calibrated transfer curve.
+-- Adobe publishes no SDK or algorithm for this adjustment; the curves below are
+-- measurements, not disassembly. See PSN_ColorLighting.md.
+FuRegisterClass("PSN_ColorLighting", CT_Tool, {
+    REGS_Name = "PSN_ColorLighting",
+    REGS_Category = "PSN\\Color - Lighting",
+    REGS_OpIconString = "CL",
+    REGS_OpDescription = "Photoshop Light adjustment layer: Exposure, Contrast, Highlights, Shadows, Whites, Blacks",
+    REG_NoMotionBlurCtrls = true,
+    REG_Fuse_NoEdit = false,
+    REG_Fuse_NoReload = false,
+})
+
+-- Measured Photoshop 28.0 "Light" adjustment layer response, neutral ramp,
+-- 8-bit sRGB, 0..1 encoded. 17 knots from 0 to 255 in steps of 15.94.
+-- Generated from 36 single-slider renders; see PSN_ColorLighting.md.
+local CURVES = {
+    exposure = {
+        [-4] = {0.0000, 0.0039, 0.0118, 0.0157, 0.0235, 0.0353, 0.0431, 0.0549, 0.0628, 0.0745, 0.0902, 0.1059, 0.1294, 0.1569, 0.1961, 0.2471, 0.3569},
+        [-2] = {0.0000, 0.0157, 0.0392, 0.0628, 0.0824, 0.1098, 0.1373, 0.1686, 0.1961, 0.2275, 0.2667, 0.3059, 0.3569, 0.4157, 0.4941, 0.6000, 0.7765},
+        [-1] = {0.0000, 0.0353, 0.0706, 0.1059, 0.1490, 0.1922, 0.2353, 0.2784, 0.3255, 0.3686, 0.4196, 0.4784, 0.5490, 0.6274, 0.7177, 0.8275, 1.0000},
+        [-0.5] = {0.0000, 0.0471, 0.0941, 0.1412, 0.1922, 0.2471, 0.2980, 0.3529, 0.4039, 0.4588, 0.5177, 0.5843, 0.6510, 0.7216, 0.8000, 0.8823, 1.0000},
+        [0] = {0.0000, 0.0628, 0.1255, 0.1882, 0.2510, 0.3137, 0.3765, 0.4392, 0.5020, 0.5608, 0.6235, 0.6863, 0.7490, 0.8118, 0.8745, 0.9373, 1.0000},
+        [0.5] = {0.0000, 0.0824, 0.1647, 0.2431, 0.3176, 0.3922, 0.4667, 0.5412, 0.6078, 0.6667, 0.7255, 0.7804, 0.8353, 0.8863, 0.9333, 0.9726, 1.0000},
+        [1] = {0.0000, 0.1098, 0.2157, 0.3098, 0.4000, 0.4863, 0.5726, 0.6471, 0.7098, 0.7608, 0.8118, 0.8549, 0.8941, 0.9294, 0.9608, 0.9843, 1.0000},
+        [2] = {0.0000, 0.1922, 0.3529, 0.4824, 0.6000, 0.6941, 0.7686, 0.8235, 0.8628, 0.8941, 0.9216, 0.9451, 0.9647, 0.9765, 0.9882, 0.9961, 1.0000},
+        [4] = {0.0000, 0.4941, 0.7412, 0.8510, 0.9137, 0.9490, 0.9686, 0.9804, 0.9882, 0.9922, 0.9922, 0.9961, 0.9961, 1.0000, 1.0000, 1.0000, 1.0000},
+    },
+    contrast = {
+        [-100] = {0.0000, 0.1255, 0.2078, 0.2823, 0.3490, 0.4078, 0.4627, 0.5059, 0.5490, 0.5804, 0.6118, 0.6510, 0.6941, 0.7451, 0.8078, 0.8902, 1.0000},
+        [-50] = {0.0000, 0.0902, 0.1647, 0.2353, 0.3020, 0.3647, 0.4196, 0.4745, 0.5255, 0.5726, 0.6196, 0.6667, 0.7177, 0.7765, 0.8431, 0.9176, 1.0000},
+        [-25] = {0.0000, 0.0784, 0.1451, 0.2118, 0.2745, 0.3372, 0.4000, 0.4588, 0.5137, 0.5686, 0.6196, 0.6745, 0.7333, 0.7961, 0.8588, 0.9294, 1.0000},
+        [0] = {0.0000, 0.0628, 0.1255, 0.1882, 0.2510, 0.3137, 0.3765, 0.4392, 0.5020, 0.5608, 0.6235, 0.6863, 0.7490, 0.8118, 0.8745, 0.9373, 1.0000},
+        [25] = {0.0000, 0.0471, 0.1059, 0.1647, 0.2235, 0.2863, 0.3490, 0.4157, 0.4863, 0.5529, 0.6274, 0.6980, 0.7647, 0.8314, 0.8902, 0.9490, 1.0000},
+        [50] = {0.0000, 0.0353, 0.0824, 0.1373, 0.1961, 0.2588, 0.3216, 0.3961, 0.4706, 0.5451, 0.6314, 0.7098, 0.7843, 0.8510, 0.9059, 0.9569, 1.0000},
+        [100] = {0.0000, 0.0078, 0.0353, 0.0784, 0.1333, 0.1961, 0.2667, 0.3490, 0.4392, 0.5333, 0.6392, 0.7372, 0.8196, 0.8863, 0.9373, 0.9765, 1.0000},
+    },
+    highlights = {
+        [-100] = {0.0000, 0.0588, 0.1177, 0.1726, 0.2314, 0.2863, 0.3451, 0.4000, 0.4588, 0.5137, 0.5490, 0.5882, 0.6274, 0.6667, 0.7216, 0.7961, 0.9529},
+        [-50] = {0.0000, 0.0628, 0.1216, 0.1804, 0.2392, 0.3020, 0.3608, 0.4196, 0.4784, 0.5373, 0.5882, 0.6392, 0.6902, 0.7412, 0.8039, 0.8745, 0.9804},
+        [0] = {0.0000, 0.0628, 0.1255, 0.1882, 0.2510, 0.3137, 0.3765, 0.4392, 0.5020, 0.5608, 0.6235, 0.6863, 0.7490, 0.8118, 0.8745, 0.9373, 1.0000},
+        [50] = {0.0000, 0.0667, 0.1294, 0.1961, 0.2627, 0.3255, 0.3922, 0.4588, 0.5255, 0.5843, 0.6588, 0.7333, 0.8039, 0.8745, 0.9373, 0.9843, 1.0000},
+        [100] = {0.0000, 0.0667, 0.1333, 0.2039, 0.2745, 0.3412, 0.4118, 0.4784, 0.5490, 0.6078, 0.6941, 0.7765, 0.8549, 0.9294, 0.9726, 0.9922, 1.0000},
+    },
+    shadows = {
+        [-100] = {0.0000, 0.0078, 0.0274, 0.0667, 0.1177, 0.1843, 0.2588, 0.3412, 0.4274, 0.5098, 0.5765, 0.6471, 0.7177, 0.7882, 0.8588, 0.9294, 1.0000},
+        [-50] = {0.0000, 0.0196, 0.0628, 0.1137, 0.1726, 0.2431, 0.3137, 0.3882, 0.4627, 0.5373, 0.6000, 0.6667, 0.7333, 0.8000, 0.8667, 0.9333, 1.0000},
+        [0] = {0.0000, 0.0628, 0.1255, 0.1882, 0.2510, 0.3137, 0.3765, 0.4392, 0.5020, 0.5608, 0.6235, 0.6863, 0.7490, 0.8118, 0.8745, 0.9373, 1.0000},
+        [50] = {0.0000, 0.1451, 0.2353, 0.2980, 0.3490, 0.3961, 0.4471, 0.4941, 0.5412, 0.5843, 0.6471, 0.7059, 0.7647, 0.8235, 0.8823, 0.9412, 1.0000},
+        [100] = {0.0000, 0.3098, 0.4039, 0.4431, 0.4706, 0.4980, 0.5294, 0.5569, 0.5843, 0.6118, 0.6706, 0.7255, 0.7804, 0.8353, 0.8902, 0.9451, 1.0000},
+    },
+    whites = {
+        [-100] = {0.0000, 0.0628, 0.1255, 0.1843, 0.2431, 0.3020, 0.3608, 0.4157, 0.4667, 0.5177, 0.5726, 0.6235, 0.6745, 0.7255, 0.7725, 0.8392, 1.0000},
+        [-50] = {0.0000, 0.0628, 0.1255, 0.1843, 0.2431, 0.3059, 0.3608, 0.4196, 0.4745, 0.5294, 0.5843, 0.6431, 0.7020, 0.7608, 0.8235, 0.8980, 1.0000},
+        [0] = {0.0000, 0.0628, 0.1255, 0.1882, 0.2510, 0.3137, 0.3765, 0.4392, 0.5020, 0.5608, 0.6235, 0.6863, 0.7490, 0.8118, 0.8745, 0.9373, 1.0000},
+        [50] = {0.0000, 0.0628, 0.1255, 0.1922, 0.2588, 0.3294, 0.3961, 0.4706, 0.5412, 0.6078, 0.6784, 0.7451, 0.8118, 0.8784, 0.9412, 0.9922, 1.0000},
+        [100] = {0.0000, 0.0667, 0.1412, 0.2196, 0.3059, 0.4039, 0.5059, 0.6078, 0.6980, 0.7765, 0.8471, 0.9137, 0.9686, 1.0000, 1.0000, 1.0000, 1.0000},
+    },
+    blacks = {
+        [-100] = {0.0000, 0.0000, 0.0000, 0.0000, 0.0196, 0.1020, 0.1922, 0.2745, 0.3569, 0.4314, 0.5177, 0.6078, 0.6941, 0.7765, 0.8549, 0.9294, 1.0000},
+        [-50] = {0.0000, 0.0000, 0.0667, 0.1373, 0.2039, 0.2745, 0.3412, 0.4078, 0.4745, 0.5373, 0.6039, 0.6706, 0.7372, 0.8039, 0.8706, 0.9373, 1.0000},
+        [0] = {0.0000, 0.0628, 0.1255, 0.1882, 0.2510, 0.3137, 0.3765, 0.4392, 0.5020, 0.5608, 0.6235, 0.6863, 0.7490, 0.8118, 0.8745, 0.9373, 1.0000},
+        [50] = {0.0000, 0.0784, 0.1569, 0.2275, 0.2902, 0.3569, 0.4196, 0.4784, 0.5412, 0.5922, 0.6510, 0.7059, 0.7647, 0.8196, 0.8784, 0.9373, 1.0000},
+        [100] = {0.0000, 0.1020, 0.1922, 0.2667, 0.3333, 0.3961, 0.4588, 0.5177, 0.5726, 0.6196, 0.6706, 0.7216, 0.7725, 0.8275, 0.8823, 0.9412, 1.0000},
+    },
+}
+
+-- Composition order found by fitting every permutation of the six curves against
+-- the measured interaction renders (best mean error 2.6/255, see the .md).
+local ORDER = {"whites", "shadows", "highlights", "exposure", "blacks", "contrast"}
+
+-- All helpers below are globals: MultiProcessPixels hands the per-pixel callback an
+-- isolated environment, so it can only rely on globals and its passed values.
+function psnSortKeys(t)
+    local keys = {}
+    for k in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys)
+    return keys
+end
+
+CURVE_KEYS = {}
+for name, t in pairs(CURVES) do CURVE_KEYS[name] = psnSortKeys(t) end
+
+-- Sample a stored curve; knots are evenly spaced over 0..1 in encoded space.
+function psnSampleCurve(tbl, x)
+    local n = #tbl
+    local v = x * (n - 1)
+    local i = math.floor(v)
+    if i < 0 then return tbl[1] end
+    if i >= n - 1 then return tbl[n] end
+    local f = v - i
+    return tbl[i + 1] * (1 - f) + tbl[i + 2] * f
+end
+
+-- Pick, or blend, the stored curve that belongs to this slider value.
+function psnCurveFor(name, value)
+    local t = CURVES[name]
+    if t[value] then return t[value] end
+    local keys = CURVE_KEYS[name]
+    local lo, hi = keys[1], keys[#keys]
+    if value <= lo then return t[lo] end
+    if value >= hi then return t[hi] end
+    for i = 1, #keys - 1 do
+        if value >= keys[i] and value <= keys[i + 1] then lo, hi = keys[i], keys[i + 1] break end
+    end
+    local w = (value - lo) / (hi - lo)
+    local a, b = t[lo], t[hi]
+    local out = {}
+    for i = 1, #a do out[i] = a[i] * (1 - w) + b[i] * w end
+    return out
+end
+
+LUTSIZE = 8192
+
+local function srgbToLinear(v)
+    return v <= 0.04045 and v / 12.92 or ((v + 0.055) / 1.055) ^ 2.4
+end
+
+local function linearToSrgb(v)
+    return v <= 0.0031308 and v * 12.92 or 1.055 * v ^ (1 / 2.4) - 0.055
+end
+
+-- Photoshop keeps responding past +-4 EV; the measured range ends there, so beyond
+-- it an extra linear gain is stacked on the edge curve.
+local function exposureCurve(ev)
+    if ev <= 4 and ev >= -4 then return psnCurveFor("exposure", ev) end
+    local edge = ev > 0 and 4 or -4
+    local extra = 2 ^ (ev - edge)
+    local base = psnCurveFor("exposure", edge)
+    local out = {}
+    for i = 1, #base do
+        local lin = math.min(1, math.max(0, srgbToLinear(base[i]) * extra))
+        out[i] = math.min(1, math.max(0, linearToSrgb(lin)))
+    end
+    return out
+end
+
+cacheKey, cacheLUT = nil, nil
+
+function psnBuildLUT(params)
+    local curves = {
+        exposure = exposureCurve(params.exposure),
+        contrast = psnCurveFor("contrast", params.contrast),
+        highlights = psnCurveFor("highlights", params.highlights),
+        shadows = psnCurveFor("shadows", params.shadows),
+        whites = psnCurveFor("whites", params.whites),
+        blacks = psnCurveFor("blacks", params.blacks),
+    }
+    local lut = {}
+    for i = 0, LUTSIZE do
+        local x = i / LUTSIZE
+        for k = 1, #ORDER do
+            x = psnSampleCurve(curves[ORDER[k]], x)
+        end
+        lut[i + 1] = x
+    end
+    return lut
+end
+
+function Create()
+    InImage = self:AddInput("Input", "Input", {
+        LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
+    })
+    OutImage = self:AddOutput("Output", "Output", {LINKID_DataType = "Image", LINK_Main = 1})
+    InExposure = self:AddInput("Exposure", "Exposure", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 0, INP_MinScale = -5, INP_MaxScale = 5,
+        INP_MinAllowed = -5, INP_MaxAllowed = 5,
+        INPS_StatusText = "Linear-light gain in stops. Photoshop Light layer range -5.00 to +5.00.",
+    })
+    local function slider(label, id, tip)
+        return self:AddInput(label, id, {
+            LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+            INP_Default = 0, INP_Integer = true, INP_MinScale = -100,
+            INP_MaxScale = 100, INP_MinAllowed = -100, INP_MaxAllowed = 100,
+            INPS_StatusText = tip,
+        })
+    end
+    InContrast = slider("Contrast", "Contrast", "Pivots the midtones. Photoshop range -100 to +100.")
+    InHighlights = slider("Highlights", "Highlights", "Recovers or lifts the upper range. Photoshop range -100 to +100.")
+    InShadows = slider("Shadows", "Shadows", "Opens or deepens the lower range. Photoshop range -100 to +100.")
+    InWhites = slider("Whites", "Whites", "Moves the white end. Photoshop range -100 to +100.")
+    InBlacks = slider("Blacks", "Blacks", "Moves the black end. Photoshop range -100 to +100.")
+    InPreview = self:AddInput("Preview", "Preview", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+    })
+    self:BeginControlNest("Fusion Options", "FusionOptions", false, {})
+    InSpace = self:AddInput("Input encoding", "InputEncoding", {
+        LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
+        {CCS_AddString = "RGB as supplied (Photoshop-style)"},
+        {CCS_AddString = "Linear sRGB / Rec.709 primaries"},
+        INPS_StatusText = "Match Photoshop's gamma-encoded RGB. The linear option converts linear sRGB to sRGB for the adjustment and back; it is not an ACES transform.",
+    })
+    InMode = self:AddInput("Apply to", "ApplyTo", {
+        LINKID_DataType = "Number", INPID_InputControl = "ComboControl", INP_Default = 0,
+        {CCS_AddString = "Each channel (Photoshop-style)"},
+        {CCS_AddString = "Luminance, hue preserved"},
+        INPS_StatusText = "Each channel matches the measured Light layer on neutral ramps and keeps its per-channel behaviour. Luminance scales RGB by the luma ratio so saturated colours keep their hue instead of the desaturation Photoshop shows.",
+    })
+    InAlpha = self:AddInput("Pre-Divide / Post-Multiply", "PreDivide", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+        INPS_StatusText = "Unpremultiply before adjusting color, then restore the original alpha. Disable for straight-alpha inputs.",
+    })
+    self:EndControlNest()
+end
+
+-- Per-pixel callback: isolated environment, so only env values and globals here.
+local processPixel = function(x, y, p)
+    local alpha = p.A
+    if unpremultiply and alpha <= 0 then return p end
+    local factor = unpremultiply and alpha or 1
+    local r, g, b = p.R / factor, p.G / factor, p.B / factor
+    if linear then
+        r = r <= 0.0031308 and 12.92 * r or 1.055 * r ^ (1 / 2.4) - 0.055
+        g = g <= 0.0031308 and 12.92 * g or 1.055 * g ^ (1 / 2.4) - 0.055
+        b = b <= 0.0031308 and 12.92 * b or 1.055 * b ^ (1 / 2.4) - 0.055
+    end
+    -- SDR adjustment: clamp for the curve, then carry the out-of-range residual
+    -- through so untouched HDR or negative values survive in the compositor.
+    local cr = r < 0 and 0 or (r > 1 and 1 or r)
+    local cg = g < 0 and 0 or (g > 1 and 1 or g)
+    local cb = b < 0 and 0 or (b > 1 and 1 or b)
+
+    local nr, ng, nb
+    if luma then
+        local y0 = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb
+        local pos = y0 * lutsize
+        local i = math.floor(pos)
+        local y1
+        if i < 0 then y1 = lut[1]
+        elseif i >= lutsize then y1 = lut[lutsize + 1]
+        else y1 = lut[i + 1] + (lut[i + 2] - lut[i + 1]) * (pos - i) end
+        if y0 > 0.00001 then
+            local gain = y1 / y0
+            nr, ng, nb = cr * gain, cg * gain, cb * gain
+        else
+            nr, ng, nb = y1, y1, y1
+        end
+    else
+        local pos = cr * lutsize
+        local i = math.floor(pos)
+        if i < 0 then nr = lut[1]
+        elseif i >= lutsize then nr = lut[lutsize + 1]
+        else nr = lut[i + 1] + (lut[i + 2] - lut[i + 1]) * (pos - i) end
+        pos = cg * lutsize
+        i = math.floor(pos)
+        if i < 0 then ng = lut[1]
+        elseif i >= lutsize then ng = lut[lutsize + 1]
+        else ng = lut[i + 1] + (lut[i + 2] - lut[i + 1]) * (pos - i) end
+        pos = cb * lutsize
+        i = math.floor(pos)
+        if i < 0 then nb = lut[1]
+        elseif i >= lutsize then nb = lut[lutsize + 1]
+        else nb = lut[i + 1] + (lut[i + 2] - lut[i + 1]) * (pos - i) end
+    end
+
+    r = r - cr + (nr < 0 and 0 or (nr > 1 and 1 or nr))
+    g = g - cg + (ng < 0 and 0 or (ng > 1 and 1 or ng))
+    b = b - cb + (nb < 0 and 0 or (nb > 1 and 1 or nb))
+    if linear then
+        r = r <= 0.04045 and r / 12.92 or ((r + 0.055) / 1.055) ^ 2.4
+        g = g <= 0.04045 and g / 12.92 or ((g + 0.055) / 1.055) ^ 2.4
+        b = b <= 0.04045 and b / 12.92 or ((b + 0.055) / 1.055) ^ 2.4
+    end
+    p.R, p.G, p.B = r * factor, g * factor, b * factor
+    return p
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    if not src then return end
+    local params = {
+        exposure = InExposure:GetValue(req).Value,
+        contrast = InContrast:GetValue(req).Value,
+        highlights = InHighlights:GetValue(req).Value,
+        shadows = InShadows:GetValue(req).Value,
+        whites = InWhites:GetValue(req).Value,
+        blacks = InBlacks:GetValue(req).Value,
+    }
+    local active = false
+    if params.exposure ~= 0 or params.contrast ~= 0 or params.highlights ~= 0
+        or params.shadows ~= 0 or params.whites ~= 0 or params.blacks ~= 0 then
+        active = true
+    end
+    if not active or InPreview:GetValue(req).Value < 0.5 then OutImage:Set(req, src) return end
+    local key = table.concat({params.exposure, params.contrast, params.highlights,
+        params.shadows, params.whites, params.blacks}, ":")
+    if key ~= cacheKey then
+        cacheLUT, cacheKey = psnBuildLUT(params), key
+    end
+    src:DownloadGPUMem(req)
+    local dst = Image({IMG_Like = src})
+    dst:MultiProcessPixels(nil, {
+        lut = cacheLUT, lutsize = LUTSIZE,
+        luma = InMode:GetValue(req).Value > 0.5,
+        linear = InSpace:GetValue(req).Value > 0.5,
+        unpremultiply = InAlpha:GetValue(req).Value > 0.5,
+    }, 0, 0, src.Width, src.Height, src, processPixel)
+    OutImage:Set(req, dst)
+end
