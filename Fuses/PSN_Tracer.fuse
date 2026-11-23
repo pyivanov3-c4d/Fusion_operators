@@ -1,0 +1,833 @@
+-- PSN_Tracer 1.0
+-- Simple 2D point tracker: locks a pattern around a Point on the Tracer image and
+-- places the second image (Image) at that position, with optional scale and angle.
+-- Live mode tracks frame by frame; "Cache Track" precomputes the whole range.
+--
+-- The icon (PSN_Tracer.png) ships next to the .fuse file. Fusion wants an absolute path
+-- for REGS_IconID, so look for it next to this fuse first and then in the two standard
+-- Fusion folders. Without it the tool falls back to Fusion's default icon.
+local IconFile = (function()
+    local function exists(p)
+        local f = io.open(p, "rb")
+        if f then f:close(); return true end
+        return false
+    end
+    local candidates = {}
+    local ok, info = pcall(function() return debug.getinfo(1, "S") end)
+    if ok and info and info.source then
+        local src = info.source:gsub("^@", "")
+        local dir = src:match("^(.*)[/\\][^/\\]+$")
+        if dir then candidates[#candidates + 1] = dir .. "/PSN_Tracer.png" end
+    end
+    local appdata = os.getenv("APPDATA")
+    if appdata then
+        candidates[#candidates + 1] = appdata .. "/Blackmagic Design/Fusion/Fuses/PSN_Tracer.png"
+        candidates[#candidates + 1] = appdata .. "/Blackmagic Design/Fusion/Icons/PSN_Tracer.png"
+    end
+    for _, p in ipairs(candidates) do
+        if exists(p) then return p end
+    end
+    return nil
+end)()
+
+FuRegisterClass("PSN_Tracer", CT_Tool, {
+    REGS_Name = "PSN_Tracer",
+    REGS_Category = "PSN\\Tracking",
+    REGS_OpIconString = "Trc",
+    REGS_OpDescription = "Tracks a point on the Tracer image and places the second image there",
+    REGS_IconID = IconFile,
+    REG_NoMotionBlurCtrls = true,
+    REG_NoBlendCtrls = true,
+    REG_NoObjMatCtrls = true,
+    REG_OpNoMask = true,
+    REGB_Temporal = true,
+    REGS_Context = "PSN::Tracer",
+})
+
+local floor, ceil = math.floor, math.ceil
+local min, max, abs, sqrt = math.min, math.max, math.abs, math.sqrt
+local rad, cos, sin = math.rad, math.cos, math.sin
+
+-- Per-instance state (file-scope locals are visible to Process, unlike locals in Create).
+local Template = nil          -- {n, ph, vals, tz, full, coarse, tz2}
+local TemplateKey = nil
+local Runtime = {}            -- frame -> {x, y} positions computed live
+local CacheParsed = nil
+local CacheKey = nil
+-- Anchor used when the Point was edited without updating the stored reference:
+-- remembered here so the template is not rebuilt on every frame.
+local MovedRef = nil
+
+local function clamp(v, lo, hi)
+    if v < lo then return lo elseif v > hi then return hi end
+    return v
+end
+
+
+local function frameOf(t)
+    return floor(t + 0.5)
+end
+
+local function isOn(inp, req)
+    local v = inp:GetValue(req)
+    return v and v.Value > 0.5
+end
+
+local function status(text, time)
+    if InStatus then InStatus:SetSource(Text(text), time) end
+end
+
+-- First point of the viewer handle, if the user placed one.
+local function polyPoint(poly)
+    if poly == nil then return nil end
+    local ok, n = pcall(function() return poly:GetCount() end)
+    if not ok or not n or n < 1 then return nil end
+    local p = poly:GetPoint(0)
+    if p then return p.X, p.Y end
+    return nil
+end
+
+-- Fusion point controls are relative 0-1; the tracker works in pixels. A value
+-- outside the frame is treated as pixels already (covers older comps).
+local function toPixels(x, y, W, H)
+    if x < -0.5 or y < -0.5 or x > 1.5 or y > 1.5 then return x, y end
+    return x * (W - 1), y * (H - 1)
+end
+
+---------------------------------------------------------------------------
+-- Tracking core
+---------------------------------------------------------------------------
+
+-- Pack raw pixel values into a matchable template (zero-mean + sample list).
+local function packTemplate(vals, n, ph, cx, cy)
+    local total = n * n
+    local sum = 0
+    for i = 1, total do sum = sum + vals[i] end
+    local mean = sum / total
+    local tz = {}
+    local tz2 = 0
+    for i = 1, total do
+        local d = vals[i] - mean
+        tz[i] = d
+        tz2 = tz2 + d * d
+    end
+    if tz2 <= 1e-9 then return nil end
+    local full = {}
+    for j = 0, n - 1 do
+        for i = 0, n - 1 do
+            full[#full + 1] = {i - ph, j - ph, tz[j * n + i + 1]}
+        end
+    end
+    return {n = n, ph = ph, vals = vals, tz = tz, tz2 = tz2, full = full, cx = cx, cy = cy}
+end
+
+-- Build a zero-mean luminance template around (cx, cy).
+local function buildTemplate(img, cx, cy, ph)
+    local W, H = img.Width, img.Height
+    if W <= 2 * ph + 1 or H <= 2 * ph + 1 then return nil end
+    cx = clamp(cx, ph, W - 1 - ph)
+    cy = clamp(cy, ph, H - 1 - ph)
+    local n = 2 * ph + 1
+    local vals = {}
+    local p = Pixel()
+    local k = 1
+    for j = -ph, ph do
+        local yy = cy + j
+        for i = -ph, ph do
+            img:GetPixel(cx + i, yy, p)
+            vals[k] = 0.2126 * p.R + 0.7152 * p.G + 0.0722 * p.B
+            k = k + 1
+        end
+    end
+    return packTemplate(vals, n, ph, cx, cy)
+end
+
+-- Resample the reference patch to another size (used by the scale search).
+local ScaledTemplates = {}
+local function scaledTemplate(tpl, scale)
+    local n = tpl.n
+    local size = floor((n - 1) * scale + 0.5) + 1
+    if size < 9 then size = 9 end
+    if size == n then return tpl end
+    local cached = ScaledTemplates[size]
+    if cached then return cached end
+    local src = tpl.vals
+    local vals = {}
+    local k = 1
+    local denom = size - 1
+    for j = 0, denom do
+        local sy = j * (n - 1) / denom
+        local y0 = floor(sy)
+        local fy = sy - y0
+        local y1 = min(y0 + 1, n - 1)
+        for i = 0, denom do
+            local sx = i * (n - 1) / denom
+            local x0 = floor(sx)
+            local fx = sx - x0
+            local x1 = min(x0 + 1, n - 1)
+            local v00 = src[y0 * n + x0 + 1]
+            local v10 = src[y0 * n + x1 + 1]
+            local v01 = src[y1 * n + x0 + 1]
+            local v11 = src[y1 * n + x1 + 1]
+            local top = v00 + (v10 - v00) * fx
+            local bot = v01 + (v11 - v01) * fx
+            vals[k] = top + (bot - top) * fy
+            k = k + 1
+        end
+    end
+    local t = packTemplate(vals, size, floor(size / 2), tpl.cx, tpl.cy)
+    ScaledTemplates[size] = t
+    return t
+end
+
+-- Read a luminance window of half-size `half` around integer centre (cx, cy).
+local function readWindow(img, cx, cy, half)
+    local side = 2 * half + 1
+    local win = {}
+    local p = Pixel()
+    local bx, by = cx - half, cy - half
+    local k = 1
+    for y = by, by + side - 1 do
+        for x = bx, bx + side - 1 do
+            img:GetPixel(x, y, p)
+            win[k] = 0.2126 * p.R + 0.7152 * p.G + 0.0722 * p.B
+            k = k + 1
+        end
+    end
+    return win, side
+end
+
+-- Score one template against a pre-read window: coarse positions, then refine.
+local function searchWindow(win, side, margin, cx, cy, R, tpl, threshold, subpixel)
+    local tz2 = tpl.tz2
+    local full = tpl.full
+    local nfull = #full
+
+    local function ncc(dx, dy)
+        local num, sw, sw2 = 0, 0, 0
+        local rowBase = (dy + margin) * side + (dx + margin) + 1
+        for i = 1, nfull do
+            local s = full[i]
+            local v = win[rowBase + s[2] * side + s[1]]
+            num = num + s[3] * v
+            sw = sw + v
+            sw2 = sw2 + v * v
+        end
+        local var = sw2 - sw * sw / nfull
+        if var <= 1e-9 then return -2 end
+        return num / sqrt(tz2 * var)
+    end
+
+    -- Coarse pass moves in position steps but always compares the whole template:
+    -- subsampling the template itself aliases fine detail and loses the match.
+    local step = max(1, floor(R / 8))
+    local best, bx, by = -2, 0, 0
+    for dy = -R, R, step do
+        for dx = -R, R, step do
+            local sc = ncc(dx, dy)
+            if sc > best then best, bx, by = sc, dx, dy end
+        end
+    end
+    for dy = max(-R, by - step), min(R, by + step) do
+        for dx = max(-R, bx - step), min(R, bx + step) do
+            local sc = ncc(dx, dy)
+            if sc > best then best, bx, by = sc, dx, dy end
+        end
+    end
+    if best < threshold then
+        return cx + bx, cy + by, best
+    end
+
+    local sx, sy = 0, 0
+    if subpixel and abs(bx) < R and abs(by) < R then
+        local sm = ncc(bx - 1, by)
+        local sp = ncc(bx + 1, by)
+        local den = sm - 2 * best + sp
+        if abs(den) > 1e-9 then sx = clamp(0.5 * (sm - sp) / den, -0.5, 0.5) end
+        sm = ncc(bx, by - 1)
+        sp = ncc(bx, by + 1)
+        den = sm - 2 * best + sp
+        if abs(den) > 1e-9 then sy = clamp(0.5 * (sm - sp) / den, -0.5, 0.5) end
+    end
+    return cx + bx + sx, cy + by + sy, best
+end
+
+-- Search for the template around (predX, predY), optionally over a few pattern
+-- scales. Returns x, y, score, scale.
+local function searchPatch(img, predX, predY, R, tpl, threshold, subpixel, scales)
+    local list = scales
+    if not list or #list == 0 then list = {1.0} end
+    local W, H = img.Width, img.Height
+
+    local variants = {}
+    local maxPh = 0
+    for i = 1, #list do
+        local t = scaledTemplate(tpl, list[i])
+        if t then
+            variants[#variants + 1] = {tpl = t, scale = list[i]}
+            if t.ph > maxPh then maxPh = t.ph end
+        end
+    end
+    if #variants == 0 then return predX, predY, 0, 1 end
+    local margin = maxPh + R
+    if W <= 2 * margin + 1 or H <= 2 * margin + 1 then return predX, predY, 0, 1 end
+    local cx = clamp(floor(predX + 0.5), margin, W - 1 - margin)
+    local cy = clamp(floor(predY + 0.5), margin, H - 1 - margin)
+    local win, side = readWindow(img, cx, cy, margin)
+
+    local bestX, bestY, bestScore, bestScale = predX, predY, -2, list[1]
+    for i = 1, #variants do
+        local entry = variants[i]
+        local x, y, sc = searchWindow(win, side, margin, cx, cy, R, entry.tpl, threshold, subpixel)
+        local need = (i == 1) and 0 or 0.01
+        if sc > bestScore + need then
+            bestX, bestY, bestScore, bestScale = x, y, sc, entry.scale
+        end
+    end
+    if bestScore < threshold then return predX, predY, bestScore, bestScale end
+    return bestX, bestY, bestScore, bestScale
+end
+
+---------------------------------------------------------------------------
+-- Cache text <-> table
+---------------------------------------------------------------------------
+
+local function parseCache(text)
+    local parts = {}
+    for s in string.gmatch(text, "[^|]+") do parts[#parts + 1] = s end
+    if #parts < 6 then return nil end
+    local version = parts[1]
+    if version ~= "T1" and version ~= "T2" then return nil end
+    local refF = tonumber(parts[2])
+    local ph = tonumber(parts[3])
+    local R = tonumber(parts[4])
+    local count = tonumber(parts[5])
+    if not refF or not ph or not R or not count then return nil end
+    local pos = {}
+    local i = 0
+    for pair in string.gmatch(parts[6], "([^;]+)") do
+        local xs, ys, ss = string.match(pair, "([^,]+),([^,]+),?([^,]*)")
+        if xs then
+            pos[refF + i] = { tonumber(xs), tonumber(ys), tonumber(ss) or 1 }
+            i = i + 1
+        end
+    end
+    if i == 0 then return nil end
+    return {refF = refF, ph = ph, R = R, count = i, pos = pos, version = version}
+end
+
+local function getCache(req)
+    local t = InCacheText:GetValue(req)
+    local s = t and t.Value or ""
+    if s == "" then
+        if CacheKey ~= "" then CacheKey = ""; CacheParsed = nil end
+        return nil
+    end
+    if CacheKey ~= s then
+        CacheKey = s
+        CacheParsed = parseCache(s)
+    end
+    local c = CacheParsed
+    if not c then return nil end
+    -- Ignore the stored track when it was built for another reference point.
+    local refF = frameOf(InRefFrame:GetValue(req).Value)
+    local rp = InRefPoint:GetValue(req)
+    local first = c.pos[c.refF]
+    if c.refF ~= refF or not first then return nil end
+    if abs(first[1] - rp.X) > 0.01 or abs(first[2] - rp.Y) > 0.01 then return nil end
+    return c
+end
+
+local function serializeCache(refF, ph, R, xs, ys, ss)
+    local parts = {}
+    for i = 1, #xs do
+        parts[i] = string.format("%.2f,%.2f,%.4f", xs[i], ys[i], ss and ss[i] or 1)
+    end
+    return "T2|" .. refF .. "|" .. ph .. "|" .. R .. "|" .. #xs .. "|" .. table.concat(parts, ";")
+end
+
+---------------------------------------------------------------------------
+-- Reference / template resolution
+---------------------------------------------------------------------------
+
+local function getTemplate(req, plate, refF, refX, refY, ph)
+    local key = refF .. "|" .. floor(refX + 0.5) .. "|" .. floor(refY + 0.5) .. "|" .. ph
+    if Template and TemplateKey == key then return Template end
+    local img = plate
+    if frameOf(req.Time) ~= refF then
+        local ok, got = pcall(function()
+            return InPlate:GetSource(refF, REQF_SecondaryTime, REQF_SecondaryTime, { RQA_Request, req })
+        end)
+        if ok and got then img = got end
+    end
+    Template = buildTemplate(img, refX, refY, ph)
+    TemplateKey = key
+    ScaledTemplates = {}
+    return Template
+end
+
+local function trackedPosition(req, plate, curX, curY)
+    local refF = frameOf(InRefFrame:GetValue(req).Value)
+    local rp = InRefPoint:GetValue(req)
+    local refX, refY = rp.X, rp.Y
+
+    -- The handle (or the numeric Point) is the source of truth: if it was moved the
+    -- track anchors there right away, even when Fusion did not send a notification.
+    local ptX, ptY = curX, curY
+    local moved = abs(ptX - rp.X) > 0.5 or abs(ptY - rp.Y) > 0.5
+    if moved then
+        if not (MovedRef and abs(MovedRef.px - ptX) <= 0.5 and abs(MovedRef.py - ptY) <= 0.5) then
+            MovedRef = { frame = frameOf(req.Time), x = ptX, y = ptY, px = ptX, py = ptY }
+        end
+        refF, refX, refY = MovedRef.frame, MovedRef.x, MovedRef.y
+    else
+        MovedRef = nil
+        if refF < 0 then
+            return ptX, ptY
+        end
+    end
+    local t = frameOf(req.Time)
+    if t <= refF then return refX, refY end
+
+    local cache = (not moved) and getCache(req) or nil
+    if cache and cache.refF == refF and cache.pos[t] then
+        return cache.pos[t][1], cache.pos[t][2]
+    end
+    if Runtime[t] then return Runtime[t][1], Runtime[t][2] end
+
+    local tpl = getTemplate(req, plate, refF, refX, refY, floor(InPattern:GetValue(req).Value + 0.5))
+    if not tpl then return refX, refY end
+
+    local startF, sx, sy, s = refF, refX, refY, 1
+    for f = t - 1, refF, -1 do
+        if cache and cache.pos[f] then
+            sx, sy, startF = cache.pos[f][1], cache.pos[f][2], f
+            s = cache.pos[f][3] or 1
+            break
+        elseif Runtime[f] then
+            sx, sy, startF = Runtime[f][1], Runtime[f][2], f
+            s = Runtime[f][3] or 1
+            break
+        end
+    end
+
+    local R = floor(InRadius:GetValue(req).Value + 0.5)
+    local thr = InThreshold:GetValue(req).Value
+    local sub = isOn(InSubpixel, req)
+    local trackScale = isOn(InTrackScale, req)
+
+    -- Fill small gaps in frame order: a multi-threaded render asks for frames out
+    -- of sequence, and each step needs the previous position. The fetch count is
+    -- capped so a big jump cannot stall the evaluation.
+    local scales
+    if trackScale then
+        scales = { s, s * 0.98, s * 1.02 }
+    else
+        scales = { 1 }
+    end
+    local f = startF
+    local budget = 64
+    while f < t and budget > 0 do
+        f = f + 1
+        local img = plate
+        if f ~= t then
+            local ok, got = pcall(function()
+                return InPlate:GetSource(f, REQF_SecondaryTime, REQF_SecondaryTime, { RQA_Request, req })
+            end)
+            img = ok and got or nil
+            budget = budget - 1
+        end
+        if not img then break end
+        local nx, ny, sc, ns = searchPatch(img, sx, sy, R, tpl, thr, sub, scales)
+        ns = clamp(ns, 0.5, 2.5)
+        Runtime[f] = { nx, ny, ns }
+        sx, sy, s = nx, ny, ns
+    end
+    return sx, sy
+end
+
+---------------------------------------------------------------------------
+-- Placement (manual bilinear so no Fusion Transform dependency)
+---------------------------------------------------------------------------
+
+local function placeSticker(img2, out, px, py, scale, angle)
+    local W2, H2 = img2.Width, img2.Height
+    local baseW, baseH = out.Width, out.Height
+    if W2 < 1 or H2 < 1 then return end
+    local s = max(scale, 0.0001)
+    local inv = 1 / s
+    local ca, sa = cos(rad(angle)), sin(rad(angle))
+    local pivotX, pivotY = (W2 - 1) * 0.5, (H2 - 1) * 0.5
+    local hw, hh = W2 * 0.5 * s, H2 * 0.5 * s
+    local radius = sqrt(hw * hw + hh * hh)
+    local x0 = max(0, floor(px - radius))
+    local x1 = min(baseW - 1, ceil(px + radius))
+    local y0 = max(0, floor(py - radius))
+    local y1 = min(baseH - 1, ceil(py + radius))
+    if x1 < x0 or y1 < y0 then return end
+
+    local p0, p1, p2, p3 = Pixel(), Pixel(), Pixel(), Pixel()
+    local dst = Pixel()
+    local lastX0, lastX1 = -1, -1
+    local q0R, q0G, q0B, q0A, q1R, q1G, q1B, q1A
+    local q2R, q2G, q2B, q2A, q3R, q3G, q3B, q3A
+
+    for y = y0, y1 do
+        local v = (y - py) * inv
+        local rowS = sa * v + pivotX
+        local rowC = ca * v + pivotY
+        for x = x0, x1 do
+            local u = (x - px) * inv
+            local sx = ca * u + rowS
+            local sy = -sa * u + rowC
+            if sx > -1 and sx < W2 and sy > -1 and sy < H2 then
+                sx = clamp(sx, 0, W2 - 1)
+                sy = clamp(sy, 0, H2 - 1)
+                local ix, iy = floor(sx), floor(sy)
+                local fx, fy = sx - ix, sy - iy
+                local ix1 = ix + 1; if ix1 > W2 - 1 then ix1 = W2 - 1 end
+                local iy1 = iy + 1; if iy1 > H2 - 1 then iy1 = H2 - 1 end
+                if ix ~= lastX0 or iy ~= lastX1 then
+                    img2:GetPixel(ix, iy, p0)
+                    img2:GetPixel(ix1, iy, p1)
+                    img2:GetPixel(ix, iy1, p2)
+                    img2:GetPixel(ix1, iy1, p3)
+                    q0R, q0G, q0B, q0A = p0.R, p0.G, p0.B, p0.A
+                    q1R, q1G, q1B, q1A = p1.R, p1.G, p1.B, p1.A
+                    q2R, q2G, q2B, q2A = p2.R, p2.G, p2.B, p2.A
+                    q3R, q3G, q3B, q3A = p3.R, p3.G, p3.B, p3.A
+                    lastX0, lastX1 = ix, iy
+                end
+                local w00 = (1 - fx) * (1 - fy)
+                local w10 = fx * (1 - fy)
+                local w01 = (1 - fx) * fy
+                local w11 = fx * fy
+                local a = q0A * w00 + q1A * w10 + q2A * w01 + q3A * w11
+                if a > 0.0005 then
+                    local r = q0R * w00 + q1R * w10 + q2R * w01 + q3R * w11
+                    local g = q0G * w00 + q1G * w10 + q2G * w01 + q3G * w11
+                    local b = q0B * w00 + q1B * w10 + q2B * w01 + q3B * w11
+                    out:GetPixel(x, y, dst)
+                    local ia = 1 - a
+                    dst.R = r + dst.R * ia
+                    dst.G = g + dst.G * ia
+                    dst.B = b + dst.B * ia
+                    dst.A = a + dst.A * ia
+                    out:SetPixel(x, y, dst)
+                end
+            end
+        end
+    end
+end
+
+---------------------------------------------------------------------------
+-- UI
+---------------------------------------------------------------------------
+
+-- Draw a cross at the tracked point so the position is visible without relying
+-- on Fusion's on-screen control overlay.
+local function drawMarker(out, px, py)
+    local W, H = out.Width, out.Height
+    local cx, cy = floor(px + 0.5), floor(py + 0.5)
+    local p = Pixel({ R = 1, G = 0.85, B = 0, A = 1 })
+    local len = 14
+    for d = -len, len do
+        local xh, yv = cx + d, cy + d
+        if xh >= 0 and xh < W then
+            if cy >= 0 and cy < H then out:SetPixel(xh, cy, p) end
+            if cy + 1 < H then out:SetPixel(xh, cy + 1, p) end
+        end
+        if yv >= 0 and yv < H then
+            if cx >= 0 and cx < W then out:SetPixel(cx, yv, p) end
+            if cx + 1 < W then out:SetPixel(cx + 1, yv, p) end
+        end
+    end
+end
+
+function Create()
+    InPoint = self:AddInput("Point", "Point", {
+        LINKID_DataType = "Point",
+        INPID_InputControl = "OffsetControl",
+        INP_DefaultX = 0.5, INP_DefaultY = 0.5,
+        INP_DoNotifyChanged = true,
+        INPS_StatusText = "Tracked point, relative 0-1 like Fusion's other point controls (0.5, 0.5 is the centre).",
+    })
+
+    InHandle = self:AddInput("Handle", "Handle", {
+        LINKID_DataType = "Polyline",
+        INPID_InputControl = "LabelControl",
+        INPID_PreviewControl = "PolylineControl",
+        ICS_Name = "Drag in the viewer to set the tracked point",
+        PLC_DrawMode = 0,
+        INP_DoNotifyChanged = true,
+        INPS_StatusText = "Click in the viewer to place a point; drag it to move the track anchor.",
+    })
+
+    InPlate = self:AddInput("Tracer", "Tracer", {
+        LINKID_DataType = "Image", LINK_Main = 1, INP_AcceptsDoD = false,
+        INPS_StatusText = "Image that is searched. The pattern is taken around the Point on the reference frame.",
+    })
+    InImage = self:AddInput("Image", "Image", {
+        LINKID_DataType = "Image", LINK_Main = 2, INP_AcceptsDoD = false,
+        INPS_StatusText = "Image that is placed at the tracked position.",
+    })
+    OutImage = self:AddOutput("Output", "Output", { LINKID_DataType = "Image", LINK_Main = 1 })
+
+
+    InTrack = self:AddInput("Track", "Track", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+        INPS_StatusText = "Off: Image sits on the Point. On: the point is tracked with pattern matching.",
+    })
+
+    InRadius = self:AddInput("Search Radius", "SearchRadius", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 24, INP_Integer = true,
+        INP_MinScale = 2, INP_MaxScale = 100, INP_MinAllowed = 1, INP_MaxAllowed = 400,
+        INPS_StatusText = "Maximum movement per frame, in pixels.",
+    })
+
+    InScale = self:AddInput("Scale", "Scale", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 1, INP_MinAllowed = 0.001, INP_MaxAllowed = 1000,
+        INP_MinScale = 0.1, INP_MaxScale = 4,
+        INPS_StatusText = "Scale of the placed Image.",
+    })
+
+    InAngle = self:AddInput("Angle", "Angle", {
+        LINKID_DataType = "Number", INPID_InputControl = "ScrewControl",
+        INP_Default = 0, INP_MinScale = 0, INP_MaxScale = 360,
+        INPS_StatusText = "Rotation of the placed Image, degrees.",
+    })
+
+    self:BeginControlNest("Track Cache", "TrackCache", false, {})
+        InSetRef = self:AddInput("Set Reference", "SetReference", {
+            LINKID_DataType = "Number", INPID_InputControl = "ButtonControl",
+            INP_DoNotifyChanged = true, ICD_Width = 0.32,
+            INPS_StatusText = "Use the current frame and the current Point as the tracking reference.",
+        })
+        InCache = self:AddInput("Cache Track", "CacheTrack", {
+            LINKID_DataType = "Number", INPID_InputControl = "ButtonControl",
+            INP_DoNotifyChanged = true, ICD_Width = 0.32,
+            INPS_StatusText = "Track the whole range from the reference frame and store the positions in the comp.",
+        })
+        InClear = self:AddInput("Delete Cache", "DeleteCache", {
+            LINKID_DataType = "Number", INPID_InputControl = "ButtonControl",
+            INP_DoNotifyChanged = true, ICD_Width = 0.32,
+            INPS_StatusText = "Remove the cached positions.",
+        })
+        InCacheTo = self:AddInput("Cache To", "CacheTo", {
+            LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+            INP_Default = 0, INP_Integer = true, INP_MinAllowed = 0, INP_MaxAllowed = 100000,
+            INP_MinScale = 0, INP_MaxScale = 100,
+            INPS_StatusText = "Last frame to cache. 0 uses the project end frame.",
+        })
+        InStatus = self:AddInput("Status", "Status", {
+            LINKID_DataType = "Text", INPID_InputControl = "LabelControl",
+            INP_External = false, ICS_ReadOnly = true,
+        })
+    self:EndControlNest()
+
+    self:BeginControlNest("Advanced", "Advanced", false, {})
+        InPattern = self:AddInput("Pattern Size", "PatternSize", {
+            LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+            INP_Default = 16, INP_Integer = true,
+            INP_MinScale = 4, INP_MaxScale = 48, INP_MinAllowed = 2, INP_MaxAllowed = 96,
+            INPS_StatusText = "Half-size of the tracked patch, in pixels. Smaller tracks detail, bigger is steadier.",
+        })
+        InThreshold = self:AddInput("Match Threshold", "MatchThreshold", {
+            LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+            INP_Default = 0.3, INP_MinAllowed = 0, INP_MaxAllowed = 1,
+            INP_MinScale = 0, INP_MaxScale = 1,
+            INPS_StatusText = "Below this correlation the point holds instead of jumping.",
+        })
+        InSubpixel = self:AddInput("Subpixel", "Subpixel", {
+            LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+            INPS_StatusText = "Refine the match to fractional pixels.",
+        })
+        InTrackScale = self:AddInput("Track Scale", "TrackScale", {
+            LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+            INPS_StatusText = "Also follow a change of the pattern's size (camera push-ins, zooms).",
+        })
+        InMarker = self:AddInput("Show Marker", "ShowMarker", {
+            LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl", INP_Default = 1,
+            INPS_StatusText = "Draw a cross at the tracked point in the image. Turn off for the final render.",
+        })
+    self:EndControlNest()
+
+    -- Hidden storage (saved with the comp, not shown in the Inspector).
+    InRefFrame = self:AddInput("RefFrame", "RefFrame", {
+        LINKID_DataType = "Number", INP_External = false, IC_Visible = false,
+        INP_Default = -1, INP_Integer = true,
+    })
+    InRefPoint = self:AddInput("RefPoint", "RefPoint", {
+        LINKID_DataType = "Point", INP_External = false, IC_Visible = false,
+        INP_DefaultX = 960, INP_DefaultY = 540,
+    })
+    InCacheText = self:AddInput("CacheData", "CacheData", {
+        LINKID_DataType = "Text", INP_External = false, IC_Visible = false,
+    })
+end
+
+---------------------------------------------------------------------------
+-- Cache build / delete (main thread, from NotifyChanged)
+---------------------------------------------------------------------------
+
+local function clearCache(time, text)
+    InCacheText:SetSource(Text(""), time)
+    CacheParsed, CacheKey = nil, nil
+    Runtime = {}
+    Template, TemplateKey = nil, nil
+    ScaledTemplates = {}
+    MovedRef = nil
+    status(text, time)
+end
+
+local function buildCache(time)
+    -- Always anchor on the Point as it currently stands: the field is the source
+    -- of truth, the stored reference merely remembers the last build.
+    local refF = frameOf(time)
+    local hx, hy = polyPoint(InHandle:GetSource(time))
+    local firstImg = InPlate:GetSource(refF)
+    local W = firstImg and firstImg.Width or 1920
+    local H = firstImg and firstImg.Height or 1080
+    local rp
+    if hx then
+        local px, py = toPixels(hx, hy, W, H)
+        rp = { X = px, Y = py }
+    else
+        local pt = InPoint:GetSource(time)
+        local px, py = toPixels(pt.X, pt.Y, W, H)
+        rp = { X = px, Y = py }
+    end
+    InRefFrame:SetSource(Number(refF), time)
+    InRefPoint:SetSource(Point(rp.X, rp.Y), time)
+    local ph = floor(InPattern:GetSource(time).Value + 0.5)
+    local R = floor(InRadius:GetSource(time).Value + 0.5)
+    local thr = InThreshold:GetSource(time).Value
+    local sub = InSubpixel:GetSource(time).Value > 0.5
+
+    local first = InPlate:GetSource(refF)
+    if not first then
+        status("No Tracer input", time)
+        return
+    end
+    local tpl = buildTemplate(first, rp.X, rp.Y, ph)
+    if not tpl then
+        status("Pattern too flat or outside the image", time)
+        return
+    end
+
+    local last = floor(self.Comp.GlobalEnd + 0.5)
+    local userLast = floor(InCacheTo:GetSource(time).Value + 0.5)
+    if userLast > 0 then last = userLast end
+    if last < refF then last = refF end
+    if last > refF + 5000 then last = refF + 5000 end
+
+    local xs, ys, ss = { rp.X }, { rp.Y }, { 1 }
+    local px, py, ps = rp.X, rp.Y, 1
+    local trackScale = InTrackScale:GetSource(time).Value > 0.5
+    local n = 0
+    for f = refF + 1, last do
+        local img = InPlate:GetSource(f)
+        if not img then break end
+        local scales
+        if trackScale then
+            scales = { ps, ps * 0.98, ps * 1.02 }
+        else
+            scales = { 1 }
+        end
+        local nx, ny, sc, ns = searchPatch(img, px, py, R, tpl, thr, sub, scales)
+        ns = clamp(ns, 0.5, 2.5)
+        px, py, ps = nx, ny, ns
+        xs[#xs + 1] = nx
+        ys[#ys + 1] = ny
+        ss[#ss + 1] = ns
+        n = n + 1
+        if n % 25 == 0 then
+            print(string.format("PSN_Tracer: cached %d frames (frame %d)", n, f))
+        end
+    end
+
+    local str = serializeCache(refF, ph, R, xs, ys, ss)
+    InCacheText:SetSource(Text(str), time)
+    CacheParsed, CacheKey = nil, nil
+    Runtime = {}
+    Template, TemplateKey = nil, nil
+    ScaledTemplates = {}
+    status(string.format("Cached %d frames (%d-%d), radius %d, pattern %d%s", #xs, refF, refF + #xs - 1, R, ph, trackScale and ", scale" or ""), time)
+end
+
+function NotifyChanged(inp, param, time)
+    if not (InRefFrame and InRefPoint and InCacheText) then return end
+    -- Moving the handle or the Point must not write any input here: writing from a
+    -- notification interrupts Fusion's interactive scrubbing, so the viewer stops
+    -- following the drag. Process picks the new position up on its own.
+    if inp == InHandle or inp == InPoint then
+        return
+    elseif inp == InSetRef and param and param.Value > 0.5 then
+        local img = InPlate:GetSource(time)
+        local W = img and img.Width or 1920
+        local H = img and img.Height or 1080
+        local pt = InPoint:GetSource(time)
+        local px, py = toPixels(pt.X, pt.Y, W, H)
+        InRefFrame:SetSource(Number(frameOf(time)), time)
+        InRefPoint:SetSource(Point(px, py), time)
+        Runtime = {}
+        Template, TemplateKey = nil, nil
+        ScaledTemplates = {}
+        status(string.format("Live - reference set at frame %d (press Cache Track to rebuild)", frameOf(time)), time)
+        InSetRef:SetSource(Number(0), time)
+    elseif inp == InCache and param and param.Value > 0.5 then
+        buildCache(time)
+        InCache:SetSource(Number(0), time)
+    elseif inp == InClear and param and param.Value > 0.5 then
+        clearCache(time, "Cache deleted - live tracking")
+        InClear:SetSource(Number(0), time)
+    end
+end
+
+---------------------------------------------------------------------------
+-- Process
+---------------------------------------------------------------------------
+
+function Process(req)
+    local plate = InPlate:GetValue(req)
+    local img2 = InImage:GetValue(req)
+
+    if not plate then
+        OutImage:Set(req, img2)
+        return
+    end
+
+    local out = Image({ IMG_Like = plate, IMG_NoData = req:IsPreCalc() })
+    out:Fill(Pixel({ R = 0, G = 0, B = 0, A = 0 }), { IMGPR_SourceReq = req })
+    if not img2 then
+        OutImage:Set(req, out)
+        return
+    end
+
+    local hx, hy = polyPoint(InHandle:GetValue(req))
+    local curX, curY
+    if hx then
+        curX, curY = toPixels(hx, hy, plate.Width, plate.Height)
+    else
+        local pt = InPoint:GetValue(req)
+        curX, curY = toPixels(pt.X, pt.Y, plate.Width, plate.Height)
+    end
+
+    local posX, posY
+    if isOn(InTrack, req) then
+        local ok, x, y = pcall(trackedPosition, req, plate, curX, curY)
+        if ok and x then
+            posX, posY = x, y
+        else
+            posX, posY = curX, curY
+        end
+    else
+        posX, posY = curX, curY
+    end
+
+    placeSticker(img2, out, posX, posY, InScale:GetValue(req).Value, InAngle:GetValue(req).Value)
+    if isOn(InMarker, req) then drawMarker(out, posX, posY) end
+    OutImage:Set(req, out)
+end

@@ -1,8 +1,9 @@
 # PSN_Threshold
 
-Photoshop-style Threshold: convert RGB to pure black or white using a single brightness cutoff, preserving alpha.
+Photoshop-style Threshold: convert RGB to pure black or white using a single brightness cutoff. The alpha channel is thresholded with the same level by default, so all four channels respond.
 
 - **Threshold Level:** integer 1–255, default **128**. Increasing the level makes more of the image black.
+- **Threshold Alpha:** on by default — alpha is binarised at the same level (transparent below, opaque above), and RGB is re-premultiplied against the new alpha. Disable to leave the original alpha untouched.
 - **Preview:** disable to pass the original image through unchanged.
 - **Input encoding:** RGB as supplied by default. The optional linear-sRGB setting applies the sRGB transfer curve before testing brightness; it is not an ACEScg or log conversion.
 - **Pre-Divide / Post-Multiply:** enabled by default for premultiplied images. Disable for straight RGB. Transparent pixels remain transparent; hidden RGB at zero alpha is cleared to black.

@@ -1,7 +1,8 @@
--- PSN_Threshold 1.0. Independently calibrated against Photoshop 27.2 RGB output.
+-- PSN_Threshold 1.1. Photoshop-style threshold on RGB, with the alpha channel included.
+-- 1.1: added "Threshold Alpha" (default on) so all four channels respond to the level.
 FuRegisterClass("PSN_Threshold",CT_Tool,{
     REGS_Name="PSN_Threshold",REGS_Category="PSN\\Color",REGS_OpIconString="Thr",
-    REGS_OpDescription="Photoshop-style black and white Threshold",
+    REGS_OpDescription="Photoshop-style black and white Threshold (RGBA)",
     REG_NoMotionBlurCtrls=true,
 })
 function Create()
@@ -10,6 +11,10 @@ function Create()
     InLevel=self:AddInput("Threshold Level","Threshold",{
         LINKID_DataType="Number",INPID_InputControl="SliderControl",INP_Integer=true,
         INP_Default=128,INP_MinScale=1,INP_MaxScale=255,INP_MinAllowed=1,INP_MaxAllowed=255,
+    })
+    InAlphaThr=self:AddInput("Threshold Alpha","ThresholdAlpha",{
+        LINKID_DataType="Number",INPID_InputControl="CheckboxControl",INP_Default=1,
+        INPS_StatusText="On: the alpha channel is binarised with the same level (all 4 channels).",
     })
     InPreview=self:AddInput("Preview","Preview",{
         LINKID_DataType="Number",INPID_InputControl="CheckboxControl",INP_Default=1,
@@ -22,13 +27,14 @@ function Create()
     })
     InAlpha=self:AddInput("Pre-Divide / Post-Multiply","PreDivide",{
         LINKID_DataType="Number",INPID_InputControl="CheckboxControl",INP_Default=1,
-        INPS_StatusText="On for premultiplied RGB; off for straight RGB. Alpha is preserved.",
+        INPS_StatusText="On for premultiplied RGB; off for straight RGB.",
     })
     self:EndControlNest()
 end
 local thresholdPixel=function(x,y,p)
-    if p.A<=0 then p.R,p.G,p.B=0,0,0; return p end
-    local factor=premultiplied and p.A or 1
+    local a=p.A
+    if a<=0 then p.R,p.G,p.B,p.A=0,0,0,0; return p end
+    local factor=premultiplied and a or 1
     local r,g,b=p.R/factor,p.G/factor,p.B/factor
     if linear then
         r=r<=0.0031308 and 12.92*r or 1.055*r^(1/2.4)-0.055
@@ -38,7 +44,12 @@ local thresholdPixel=function(x,y,p)
     r,g,b=math.max(0,math.min(1,r)),math.max(0,math.min(1,g)),math.max(0,math.min(1,b))
     -- Photoshop's tested 8-bit RGB cutoff: 30/59/11 brightness, half ties black.
     -- Tolerance absorbs float32 transport error at exact byte-valued boundaries.
-    local value=(255*(0.30*r+0.59*g+0.11*b)>level-0.5+0.00002) and factor or 0
+    local lit=(255*(0.30*r+0.59*g+0.11*b)>level-0.5+0.00002)
+    local na=a
+    if alphaThr then na=(255*a>level-0.5+0.00002) and 1 or 0 end
+    local value=0
+    if lit then value=premultiplied and na or 1 end
+    p.A=na
     p.R,p.G,p.B=value,value,value
     return p
 end
@@ -50,7 +61,9 @@ function Process(req)
     local dst=Image({IMG_Like=src})
     dst:MultiProcessPixels(nil,{
         level=math.max(1,math.min(255,math.floor(InLevel:GetValue(req).Value+0.5))),
-        premultiplied=InAlpha:GetValue(req).Value>0.5,linear=InSpace:GetValue(req).Value>0.5,
+        premultiplied=InAlpha:GetValue(req).Value>0.5,
+        linear=InSpace:GetValue(req).Value>0.5,
+        alphaThr=InAlphaThr:GetValue(req).Value>0.5,
     },0,0,src.Width,src.Height,src,thresholdPixel)
     OutImage:Set(req,dst)
 end
