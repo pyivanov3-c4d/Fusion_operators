@@ -93,7 +93,7 @@ def find_changed_fuses():
         if not line.strip():
             continue
         status = line[:2]
-        path = line[3:].strip().strip('"')
+        path = line[2:].lstrip().strip('"')
         # Handle renamed entries ("old -> new")
         if " -> " in path:
             path = path.split(" -> ")[1]

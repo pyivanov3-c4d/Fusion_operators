@@ -15,8 +15,11 @@ Copy `PSN_Tracer.fuse` **and** `PSN_Tracer.png` to `%APPDATA%\Blackmagic Design\
 | Control | What it does |
 | --- | --- |
 | **Point** | The point that is tracked, relative 0-1 like Fusion's other point controls (0.5, 0.5 is the centre; 0.001 is ~2 px on a 1920 frame). Drag the value to scrub it; the marker follows. Moving it re-anchors the track at the current frame, so press **Cache Track** again for a stored track. |
-| **Handle** | Optional viewer handle: one point of a polyline; when it has a point it overrides **Point**. Click in the viewer to place it. |`n| **Track** | Off: the Image just sits on the Point. On: the point is tracked with pattern matching. |
+| **Handle** | Optional viewer handle: one point of a polyline; when it has a point it overrides **Point**. Click in the viewer to place it. |
+| **Track** | Off: the Image just sits on the Point. On: the point is tracked with pattern matching. |
 | **Search Radius** | How far, in pixels, the point may move between two frames. Must cover the fastest motion in the shot. |
+| **Smooth Fit** | Fits a curve through this many frames before and after, so steady motion stays straight while jitter is damped (least-squares quadratic, Savitzky-Golay style). 0 is off; applied after Smooth. Keeps real motion better than Smooth, damps less. |
+| **Smooth** | Averages the point over this many frames before and after the current one, to calm frame-to-frame jitter. 0 is off; 2-4 is a good start, 8+ for a locked-off shot. With a built cache the window is symmetric; live it uses the frames already computed. |
 | **Scale**, **Angle** | Transform of the placed Image, around its own centre. Animatable. |
 | **Track Cache > Set Reference** | Uses the current frame and the current Point as the reference (the pattern is taken there). |
 | **Track Cache > Cache Track** | Tracks forward from the reference to the end frame and stores every position in the comp. |
