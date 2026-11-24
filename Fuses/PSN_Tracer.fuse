@@ -366,6 +366,70 @@ local function getTemplate(req, plate, refF, refX, refY, ph)
     return Template
 end
 
+-- Weighted average of the raw positions around frame t. Neighbours come from the
+-- cache when one exists (the window is then symmetric, frames after included);
+-- otherwise from positions already computed this session, so live smoothing
+-- trails the motion instead of leading it.
+local function smoothTrack(t, x, y, N, cache)
+    if N < 1 then return x, y end
+    local sx, sy, sw = 0, 0, 0
+    for k = -N, N do
+        local f = t + k
+        local px, py
+        if cache and cache.pos[f] then
+            px, py = cache.pos[f][1], cache.pos[f][2]
+        elseif Runtime[f] then
+            px, py = Runtime[f][1], Runtime[f][2]
+        elseif k == 0 then
+            px, py = x, y
+        end
+        if px then
+            local w = 1 - abs(k) / (N + 1)
+            sx, sy, sw = sx + px * w, sy + py * w, sw + w
+        end
+    end
+    if sw <= 0 then return x, y end
+    return sx / sw, sy / sw
+end
+
+-- Least-squares quadratic through the window, evaluated at the current frame:
+-- steady motion stays a straight line while per-frame jitter is averaged out.
+local function fitTrack(t, x, y, N, cache)
+    if N < 1 then return x, y end
+    local s0, s1, s2, s3, s4 = 0, 0, 0, 0, 0
+    local tx0, tx1, tx2 = 0, 0, 0
+    local ty0, ty1, ty2 = 0, 0, 0
+    local n = 0
+    for k = -N, N do
+        local f = t + k
+        local px, py
+        if cache and cache.pos[f] then
+            px, py = cache.pos[f][1], cache.pos[f][2]
+        elseif Runtime[f] then
+            px, py = Runtime[f][1], Runtime[f][2]
+        elseif k == 0 then
+            px, py = x, y
+        end
+        if px then
+            local k1, k2 = k, k * k
+            s0 = s0 + 1
+            s1 = s1 + k1
+            s2 = s2 + k2
+            s3 = s3 + k1 * k2
+            s4 = s4 + k2 * k2
+            tx0 = tx0 + px; tx1 = tx1 + k1 * px; tx2 = tx2 + k2 * px
+            ty0 = ty0 + py; ty1 = ty1 + k1 * py; ty2 = ty2 + k2 * py
+            n = n + 1
+        end
+    end
+    if n < 4 then return x, y end
+    local det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2)
+    if abs(det) < 1e-9 then return x, y end
+    local ax = (tx0 * (s2 * s4 - s3 * s3) - s1 * (tx1 * s4 - s3 * tx2) + s2 * (tx1 * s3 - s2 * tx2)) / det
+    local ay = (ty0 * (s2 * s4 - s3 * s3) - s1 * (ty1 * s4 - s3 * ty2) + s2 * (ty1 * s3 - s2 * ty2)) / det
+    return ax, ay
+end
+
 local function trackedPosition(req, plate, curX, curY)
     local refF = frameOf(InRefFrame:GetValue(req).Value)
     local rp = InRefPoint:GetValue(req)
@@ -586,6 +650,20 @@ function Create()
         INPS_StatusText = "Maximum movement per frame, in pixels.",
     })
 
+    InSmooth = self:AddInput("Smooth", "Smooth", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 0, INP_Integer = true,
+        INP_MinScale = 0, INP_MaxScale = 12, INP_MinAllowed = 0, INP_MaxAllowed = 60,
+        INPS_StatusText = "Averages the point over this many frames before and after the current one, to calm frame-to-frame jitter. 0 is off.",
+    })
+
+    InSmoothFit = self:AddInput("Smooth Fit", "SmoothFit", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 0, INP_Integer = true,
+        INP_MinScale = 0, INP_MaxScale = 12, INP_MinAllowed = 0, INP_MaxAllowed = 60,
+        INPS_StatusText = "Fits a curve through this many frames before and after, so steady motion stays straight while jitter is damped. 0 is off; applied after Smooth.",
+    })
+
     InScale = self:AddInput("Scale", "Scale", {
         LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
         INP_Default = 1, INP_MinAllowed = 0.001, INP_MaxAllowed = 1000,
@@ -763,6 +841,14 @@ function NotifyChanged(inp, param, time)
     -- notification interrupts Fusion's interactive scrubbing, so the viewer stops
     -- following the drag. Process picks the new position up on its own.
     if inp == InHandle or inp == InPoint then
+        -- Only the status label is written here: touching a value input would
+        -- interrupt Fusion's interactive scrubbing and freeze the viewer.
+        local cached = (InCacheText:GetSource(time).Value or "") ~= ""
+        if cached then
+            status(string.format("Point moved - press Cache Track to bake the track again (frame %d)", frameOf(time)), time)
+        else
+            status(string.format("Point at frame %d - press Cache Track to bake", frameOf(time)), time)
+        end
         return
     elseif inp == InSetRef and param and param.Value > 0.5 then
         local img = InPlate:GetSource(time)
@@ -825,6 +911,15 @@ function Process(req)
         end
     else
         posX, posY = curX, curY
+    end
+
+    local smoothN = floor(InSmooth:GetValue(req).Value + 0.5)
+    local fitN = floor(InSmoothFit:GetValue(req).Value + 0.5)
+    if smoothN > 0 or fitN > 0 then
+        local c = getCache(req)
+        local ft = frameOf(req.Time)
+        if smoothN > 0 then posX, posY = smoothTrack(ft, posX, posY, smoothN, c) end
+        if fitN > 0 then posX, posY = fitTrack(ft, posX, posY, fitN, c) end
     end
 
     placeSticker(img2, out, posX, posY, InScale:GetValue(req).Value, InAngle:GetValue(req).Value)
